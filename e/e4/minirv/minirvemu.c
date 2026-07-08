@@ -6,6 +6,7 @@ uint32_t PC = 0;
 uint32_t R[32];
 uint8_t M[1024 * 1024]; // 1 MB memory
 int halted = 0;
+uint32_t framebuffer[256][256]; // [y][x], holds 24-bit RGB values
 
 void load_program(const char *filename) {
   FILE *fp = fopen(filename, "rb");
