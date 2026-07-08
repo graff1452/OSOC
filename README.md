@@ -87,10 +87,14 @@ source ~/.bashrc
 
 # 5. Install Verilator v5.008 from source, OUTSIDE this repo
 #    (see https://verilator.org/guide/latest/install.html)
+sudo apt-get install git make autoconf g++ flex bison help2man
+#    (help2man is needed by `sudo make install` -- without it, install fails
+#    partway through with "help2man: No such file or directory")
 cd ~/Desktop
 git clone https://github.com/verilator/verilator
 cd verilator && git checkout v5.008
 autoconf && ./configure && make -j$(nproc) && sudo make install
+verilator --version   # should report "Verilator 5.008"
 
 # 6. Point NPC_HOME at npc/
 cd ~/Desktop/OSOC/ysyx-workbench
