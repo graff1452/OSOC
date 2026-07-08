@@ -51,7 +51,10 @@ verified with Verilator.
 - `csrc/main.cpp`, `vsrc/example.v` — untouched framework skeleton
 - `xor-test/` — first hands-on Verilator exercise: a two-way switch (`f = a ^ b`),
   driven by a C++ testbench with randomized inputs and `assert()`-checked output
-  against a plain-C reference computation
+  against a plain-C reference computation. Also generates an FST waveform
+  (`--trace-fst`, `VerilatedFstC`) viewable with GTKWave (`sudo apt-get install
+  gtkwave`), so signal transitions can be inspected visually rather than just
+  read off `printf` output.
 
 ### Related repos (not included here)
 
@@ -117,5 +120,6 @@ those aren't tracked anywhere and always come straight from upstream.
 - The E4 minirvEMU's memory-mapped video decode (`[0x20000000, 0x20040000)`, X at bits
   `[9:2]`, Y at bits `[17:10]`, 24-bit RGB) matches the F6 Logisim hardware exactly —
   verified by running the same `vga.hex` on both and getting a pixel-identical image.
-- `npc/**/obj_dir/` (Verilator build output) is gitignored — regenerate with `make`,
-  don't expect it to be present after a fresh clone.
+- `npc/**/obj_dir/` (Verilator build output) and `npc/**/*.fst` (waveform traces) are
+  gitignored — regenerate with `make`, don't expect them to be present after a fresh
+  clone.
