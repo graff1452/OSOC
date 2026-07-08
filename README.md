@@ -43,30 +43,46 @@ gcc -Wall -Wextra <file>.c -o <output>
 Cloned from [OSCPU/ysyx-workbench](https://github.com/OSCPU/ysyx-workbench). This is the
 scaffold the course builds up incrementally via `init.sh`.
 
-### Setup on a new machine
-
-```bash
-cd ysyx-workbench
-bash init.sh abstract-machine   # pulls in AM + sets AM_HOME
-source ~/.bashrc
-```
-
-### Related repos (not included here — see below)
+### Related repos (not included here)
 
 `init.sh` clones some subprojects as **independent git repositories**, gitignored by
-`ysyx-workbench` itself. These live in my own separate repos:
+`ysyx-workbench` itself. These live in my own separate repos, cloned inside
+`ysyx-workbench/`, alongside `abstract-machine/` and `npc/`:
 
 - **[am-kernels](https://github.com/graff1452/am-kernels)** — AM test programs + my own
   screensaver and GUI-enabled `minirvEMU`
 - **[fceux-am](https://github.com/graff1452/fceux-am)** — NES emulator ported to AM
 
-To restore them on a fresh clone:
+### Full setup on a brand-new device
+
 ```bash
+# 1. Generate an SSH key on this machine and add its public key to GitHub
+#    (Settings -> SSH and GPG keys -> New SSH key)
+ssh-keygen -t ed25519 -C "your_email@example.com"
+cat ~/.ssh/id_ed25519.pub
+
+# 2. Clone this repo
+cd ~/Desktop
+git clone git@github.com:graff1452/OSOC.git
+
+# 3. Clone the two subprojects into ysyx-workbench/
+cd OSOC/ysyx-workbench
 git clone git@github.com:graff1452/am-kernels.git
 git clone git@github.com:graff1452/fceux-am.git
+
+# 4. Point AM_HOME at the abstract-machine that came with this repo
+#    (already present -- no need to re-run init.sh for it)
+echo "export AM_HOME=$(readlink -f abstract-machine)" >> ~/.bashrc
+source ~/.bashrc
+
+# 5. (Optional) place a legally-obtained ROM to run fceux-am --
+#    nes/rom/ is gitignored, so this has to be done manually every time
+#    fceux-am/nes/rom/<name>.nes
 ```
-(Place both inside `ysyx-workbench/`, matching the original layout, so `AM_HOME`-relative
-paths in their Makefiles resolve correctly.)
+
+For any *other* `init.sh` subprojects not yet needed (`nemu`, `nvboard`,
+`npc-chisel`, ...), just run `bash init.sh <name>` from `ysyx-workbench/` as usual --
+those aren't tracked anywhere and always come straight from upstream.
 
 ### `npc/` — RTL Reimplementation (D4, in progress)
 
