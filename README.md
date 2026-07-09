@@ -46,15 +46,9 @@ scaffold the course builds up incrementally via `init.sh`.
 ### `npc/` — RTL Reimplementation (D4/E5, in progress)
 
 Skeleton for reimplementing the `minirv` processor from `f/` in real Verilog/RTL,
-verified with Verilator.
-
-- `csrc/main.cpp`, `vsrc/example.v` — untouched framework skeleton
-- `xor-test/` — first hands-on Verilator exercise: a two-way switch (`f = a ^ b`),
-  driven by a C++ testbench with randomized inputs and `assert()`-checked output
-  against a plain-C reference computation. Also generates an FST waveform
-  (`--trace-fst`, `VerilatedFstC`) viewable with GTKWave (`sudo apt-get install
-  gtkwave`), so signal transitions can be inspected visually rather than just
-  read off `printf` output.
+verified with Verilator and (for interactive testing) NVBoard. See
+[`npc/README.md`](ysyx-workbench/npc/README.md) for the full breakdown of what's in
+each subfolder (`xor-test/`, `nvboard-xor/`, `nvboard-light/`) and how to run them.
 
 ### Related repos (not included here)
 
@@ -65,6 +59,8 @@ verified with Verilator.
 - **[am-kernels](https://github.com/graff1452/am-kernels)** — AM test programs + my own
   screensaver and GUI-enabled `minirvEMU`
 - **[fceux-am](https://github.com/graff1452/fceux-am)** — NES emulator ported to AM
+- **[nvboard](https://github.com/graff1452/nvboard)** — virtual FPGA board used to test
+  RTL interactively (switches, LEDs, VGA, UART, ...)
 
 ### Full setup on a brand-new device
 
@@ -78,10 +74,13 @@ cat ~/.ssh/id_ed25519.pub
 cd ~/Desktop
 git clone git@github.com:graff1452/OSOC.git
 
-# 3. Clone the two subprojects into ysyx-workbench/
+# 3. Clone the subprojects into ysyx-workbench/
 cd OSOC/ysyx-workbench
 git clone git@github.com:graff1452/am-kernels.git
 git clone git@github.com:graff1452/fceux-am.git
+git clone git@github.com:graff1452/nvboard.git
+sudo apt-get install libsdl2-dev libsdl2-image-dev libsdl2-ttf-dev
+echo "export NVBOARD_HOME=$(readlink -f nvboard)" >> ~/.bashrc
 
 # 4. Point AM_HOME at the abstract-machine that came with this repo
 #    (already present -- no need to re-run init.sh for it)
@@ -109,9 +108,9 @@ source ~/.bashrc
 #    fceux-am/nes/rom/<name>.nes
 ```
 
-For any *other* `init.sh` subprojects not yet needed (`nemu`, `nvboard`,
-`npc-chisel`, ...), just run `bash init.sh <name>` from `ysyx-workbench/` as usual --
-those aren't tracked anywhere and always come straight from upstream.
+For any *other* `init.sh` subprojects not yet needed (`nemu`, `npc-chisel`, ...), just
+run `bash init.sh <name>` from `ysyx-workbench/` as usual -- those aren't tracked
+anywhere and always come straight from upstream.
 
 ## Notes for future me
 
