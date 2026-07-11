@@ -1,0 +1,44 @@
+# AbstractMachine (AM)
+
+A minimal, modular, machine-independent hardware abstraction layer, originally from
+[NJU-ProjectN/abstract-machine](https://github.com/NJU-ProjectN/abstract-machine).
+Bug reports/suggestions for the original project go to its maintainers, Yanyan Jiang
+(jyy@nju.edu.cn) and Zihao Yu (yuzihao@ict.ac.cn) — this is an unmodified copy, tracked
+here purely as part of the [ysyx](../) course scaffold.
+
+## What it provides
+
+AM gives programs a single, consistent API regardless of what they're actually running
+on — the same source code can target a real x86/RISC-V machine, an instruction-set
+simulator (NEMU), or eventually a student's own processor (NPC), without changes.
+
+It's split into five conceptual layers:
+
+| Layer | Provides |
+|---|---|
+| **TRM** (Turing Machine) | Physical memory + direct instruction execution — the bare minimum to run *any* program |
+| **IOE** (I/O Extension) | Basic input/output devices: timer, keyboard, display (GPU framebuffer), audio |
+| **CTE** (Context Extension) | Interrupts, exceptions, processor context switching |
+| **VME** (Virtual Memory Extension) | Virtual memory and memory protection |
+| **MPE** (Multiprocessing Extension) | Multi-core/multiprocessing support |
+
+## Key directories
+
+```
+abstract-machine/
+├── am/include/          Public API headers (am.h, amdev.h, and per-arch headers)
+├── am/src/<arch>/<platform>/   Per-target implementations (native, riscv/npc, riscv/nemu, ...)
+├── klib/                 A minimal standard-library replacement (printf, malloc, string
+│                          functions, ...) — deliberately scaled down so the same code
+│                          can run even on bare-metal targets with no OS underneath
+└── scripts/               Makefile fragments selecting ISA/platform per target
+```
+
+## How I've used this so far
+
+- `ARCH=native` — compiling AM programs to run directly on my own Linux machine
+  (fastest to iterate on; used for the screensaver and GUI-enabled `minirvEMU` in
+  [am-kernels](https://github.com/graff1452/am-kernels))
+- `scripts/minirv-npc.mk` and `am/src/riscv/npc/` already exist in this framework,
+  meaning AM has built-in support for eventually targeting my own RTL processor
+  (`npc/`, once it's further along) — no extra AM-side work needed to reach that point
