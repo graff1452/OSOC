@@ -15,6 +15,7 @@
 
 #include <isa.h>
 #include <cpu/cpu.h>
+#include <memory/vaddr.h>
 #include <readline/readline.h>
 #include <readline/history.h>
 #include "sdb.h"
@@ -23,6 +24,7 @@ static int is_batch_mode = false;
 
 void init_regex();
 void init_wp_pool();
+void isa_reg_display();
 
 /* We use the `readline' library to provide more flexibility to read from stdin. */
 static char* rl_gets() {
@@ -47,6 +49,53 @@ static int cmd_c(char *args) {
   return 0;
 }
 
+static int cmd_si(char *args) {
+  int n = 1;
+  if (args != NULL) {
+    n = atoi(args);
+  }
+  cpu_exec(n);
+  return 0;
+}
+
+static int cmd_info(char *args) {
+  if (args == NULL) {
+    printf("Usage: info SUBCMD (r = registers, w = watchpoints)\n");
+    return 0;
+  }
+  if (strcmp(args, "r") == 0) {
+    isa_reg_display();
+  }
+  else if (strcmp(args, "w") == 0) {
+    printf("Watchpoints not implemented yet.\n");
+  }
+  else {
+    printf("Unknown info subcommand '%s'\n", args);
+  }
+  return 0;
+}
+
+static int cmd_x(char *args) {
+  if (args == NULL) {
+    printf("Usage: x N EXPR\n");
+    return 0;
+  }
+  char *n_str = strtok(args, " ");
+  char *addr_str = strtok(NULL, " ");
+  if (n_str == NULL || addr_str == NULL) {
+    printf("Usage: x N EXPR\n");
+    return 0;
+  }
+  int n = atoi(n_str);
+  vaddr_t addr = strtoul(addr_str, NULL, 0);
+
+  int i;
+  for (i = 0; i < n; i++) {
+    word_t val = vaddr_read(addr + i * 4, 4);
+    printf("0x%08x: 0x%08x\n", addr + i * 4, val);
+  }
+  return 0;
+}
 
 static int cmd_q(char *args) {
   return -1;
@@ -61,6 +110,9 @@ static struct {
 } cmd_table [] = {
   { "help", "Display information about all supported commands", cmd_help },
   { "c", "Continue the execution of the program", cmd_c },
+  { "si", "Step N instructions (default 1)", cmd_si },
+  { "info", "Print program status (r = registers, w = watchpoints)", cmd_info },
+  { "x", "Scan N words of memory starting at EXPR", cmd_x },
   { "q", "Exit NEMU", cmd_q },
 
   /* TODO: Add more commands */
