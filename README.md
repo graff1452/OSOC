@@ -8,7 +8,7 @@ Personal coursework repository for the "一生一芯" (ysyx / One Student One Ch
 OSOC/
 ├── f/                  F-phase: minirv processor built in Logisim Evolution
 ├── e/                  E-phase: C toolchain, ISA simulators
-└── ysyx-workbench/     The official ysyx course framework (see below)
+└── ysyx-workbench/     The official ysyx course framework, including nemu/ (see below)
 ```
 
 ## `f/` — F6: Mini RISC-V Processor (Logisim)
@@ -49,6 +49,45 @@ Skeleton for reimplementing the `minirv` processor from `f/` in real Verilog/RTL
 verified with Verilator and (for interactive testing) NVBoard. See
 [`npc/README.md`](ysyx-workbench/npc/README.md) for the full breakdown of what's in
 each subfolder (`xor-test/`, `nvboard-xor/`, `nvboard-light/`) and how to run them.
+
+### `nemu/` — E6/PA1: NJU's ICS Simple Debugger (complete)
+
+[NEMU](https://github.com/NJU-ProjectN/nemu) — a from-scratch RISC-V (`riscv32`)
+instruction set simulator from Nanjing University's "Computer Systems Fundamentals"
+course, integrated into ysyx as its own stage. Conceptually the same idea as
+`e4/minirv/minirvemu.c`, just the professional, more complete version with a real ISA
+and a built-in interactive debugger.
+
+**All of PA1 implemented and tested:**
+- `si [N]` — single-step N instructions (default 1)
+- `info r` — print all 32 GPRs + PC (`isa_reg_display()`, was an empty stub)
+- `x N EXPR` — scan N words of memory starting at address EXPR
+- `p EXPR` — full recursive-descent expression evaluator: `+ - * /` with correct
+  precedence and parentheses, `== != &&`, register access (`$pc`, `$a0`, ...). Tested
+  against 9,646 randomly-generated expressions (`tools/gen-expr/`), cross-checked
+  against real `gcc`-compiled-and-run reference answers — 9,619 passed; the remaining
+  27 are a known limitation of the reference-oracle method itself (GCC constant-folds
+  fully-literal expressions at compile time and silently resolves division-by-zero
+  differently than genuine runtime execution would, rather than crashing)
+- `w EXPR` / `d N` / `info w` — full watchpoint system: expression re-evaluated and
+  compared every instruction cycle, execution pauses automatically on change
+
+**Real bugs found and fixed along the way** (worth remembering):
+- `init_regex()` was never called in the standalone test harness → segfault inside
+  `regexec()` on the *first* token of the *simplest* possible input
+- Two independent token-count limits (the `tokens[]` array size *and* a hardcoded
+  `>= 32` check inside `make_token()`) — growing one without the other silently did
+  nothing
+- `eval()` used unsigned (`word_t`) arithmetic throughout, but the reference C programs
+  evaluate as signed `int` until the final assignment — caused wrong answers on any
+  expression involving negative intermediate division results
+
+**Setup:** needs `bash init.sh nemu` (sets `$NEMU_HOME`), `bison flex libreadline-dev`,
+and (Ubuntu-specific) a one-line comment-out of `gnu/stubs-ilp32.h`'s include in
+`/usr/riscv64-linux-gnu/include/gnu/stubs.h` to work around a missing 32-bit multilib
+header. Configure via `make menuconfig` (Base ISA → riscv32, leave "Application on
+Abstract-Machine" **unselected** — that option is for a different build mode and will
+break the normal build), then `make`.
 
 ### Related repos (not included here)
 
@@ -120,12 +159,26 @@ sudo apt-get install libunwind-dev liblzma-dev
 make init
 echo exit | ./bin/iEDA -v
 
-# 8. (Optional) place a legally-obtained ROM to run fceux-am --
+# 8. Set up NEMU (E6/PA1)
+cd ~/Desktop/OSOC/ysyx-workbench
+bash init.sh nemu
+source ~/.bashrc
+sudo apt-get install bison flex libreadline-dev
+# Ubuntu's riscv64-linux-gnu cross-toolchain is missing 32-bit multilib headers:
+sudo sed -i 's|# include <gnu/stubs-ilp32.h>|// # include <gnu/stubs-ilp32.h>|' \
+  /usr/riscv64-linux-gnu/include/gnu/stubs.h
+cd nemu
+make menuconfig   # Base ISA -> riscv32 (default); leave "Application on
+                  # Abstract-Machine" UNSELECTED, or the build breaks
+make
+./build/riscv32-nemu-interpreter
+
+# 9. (Optional) place a legally-obtained ROM to run fceux-am --
 #    nes/rom/ is gitignored, so this has to be done manually every time
 #    fceux-am/nes/rom/<name>.nes
 ```
 
-For any *other* `init.sh` subprojects not yet needed (`nemu`, `npc-chisel`, ...), just
+For any *other* `init.sh` subprojects not yet needed (`npc-chisel`, ...), just
 run `bash init.sh <name>` from `ysyx-workbench/` as usual -- those aren't tracked
 anywhere and always come straight from upstream.
 
