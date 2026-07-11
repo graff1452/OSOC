@@ -7,8 +7,11 @@ real processor build — **sCPU** (the sISA processor, not yet `minirv`) — is 
 
 ## Directory guide
 
-`vsrc/top.v` and `csrc/main.cpp` at this level are still the framework's untouched
-placeholder skeleton, reserved for the eventual `minirv` build. Everything else:
+`vsrc/top.v` and `csrc/main.cpp` at this level are currently a leftover copy of the
+`xor-test/` circuit (from early testing of the framework's `sim` Makefile target,
+before `xor-test/` existed as its own separate folder) — **not yet the real `minirv`
+NPC build**. Worth replacing with the actual processor once that work starts, rather
+than treating this as reserved/empty placeholder space. Everything else:
 
 | Folder | What it is |
 |---|---|
