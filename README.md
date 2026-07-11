@@ -61,6 +61,9 @@ each subfolder (`xor-test/`, `nvboard-xor/`, `nvboard-light/`) and how to run th
 - **[fceux-am](https://github.com/graff1452/fceux-am)** — NES emulator ported to AM
 - **[nvboard](https://github.com/graff1452/nvboard)** — virtual FPGA board used to test
   RTL interactively (switches, LEDs, VGA, UART, ...)
+- **[yosys-sta](https://github.com/graff1452/yosys-sta)** — ASIC synthesis (Yosys) +
+  timing/power analysis (iEDA) pipeline, used to turn `npc/` RTL into a real
+  standard-cell netlist and get a first PPA (performance/power/area) estimate
 
 ### Full setup on a brand-new device
 
@@ -103,7 +106,21 @@ cd ~/Desktop/OSOC/ysyx-workbench
 bash init.sh npc
 source ~/.bashrc
 
-# 7. (Optional) place a legally-obtained ROM to run fceux-am --
+# 7. Clone yosys-sta (synthesis + timing/power analysis) and install its toolchain
+cd ~/Desktop
+git clone git@github.com:graff1452/yosys-sta.git
+# download oss-cad-suite for your architecture (`uname -m`) from
+# https://github.com/YosysHQ/oss-cad-suite-build/releases, then:
+tar -xzf oss-cad-suite-linux-*.tgz -C ~/Desktop
+echo 'export PATH=$PATH:'"$HOME"'/Desktop/oss-cad-suite/bin' >> ~/.bashrc
+source ~/.bashrc
+yosys --version   # should report >= 0.48
+cd yosys-sta
+sudo apt-get install libunwind-dev liblzma-dev
+make init
+echo exit | ./bin/iEDA -v
+
+# 8. (Optional) place a legally-obtained ROM to run fceux-am --
 #    nes/rom/ is gitignored, so this has to be done manually every time
 #    fceux-am/nes/rom/<name>.nes
 ```
