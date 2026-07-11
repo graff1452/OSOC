@@ -25,6 +25,7 @@ static int is_batch_mode = false;
 void init_regex();
 void init_wp_pool();
 void isa_reg_display();
+word_t expr(char *e, bool *success);
 
 /* We use the `readline' library to provide more flexibility to read from stdin. */
 static char* rl_gets() {
@@ -67,7 +68,17 @@ static int cmd_info(char *args) {
     isa_reg_display();
   }
   else if (strcmp(args, "w") == 0) {
-    printf("Watchpoints not implemented yet.\n");
+    extern WP* get_wp_head();
+    WP *p = get_wp_head();
+    if (p == NULL) {
+      printf("No watchpoints.\n");
+    } else {
+      printf("Num  What\n");
+      while (p != NULL) {
+        printf("%-4d %s\n", p->NO, p->expr_str);
+        p = p->next;
+      }
+    }
   }
   else {
     printf("Unknown info subcommand '%s'\n", args);
@@ -97,6 +108,61 @@ static int cmd_x(char *args) {
   return 0;
 }
 
+static int cmd_w(char *args) {
+  if (args == NULL) {
+    printf("Usage: w EXPR\n");
+    return 0;
+  }
+
+  bool success = true;
+  word_t val = expr(args, &success);
+  if (!success) {
+    printf("Invalid expression\n");
+    return 0;
+  }
+
+  WP *wp = new_wp();
+  strncpy(wp->expr_str, args, sizeof(wp->expr_str) - 1);
+  wp->expr_str[sizeof(wp->expr_str) - 1] = '\0';
+  wp->old_val = val;
+
+  printf("Watchpoint %d: %s\n", wp->NO, wp->expr_str);
+  return 0;
+}
+
+static int cmd_d(char *args) {
+  if (args == NULL) {
+    printf("Usage: d N\n");
+    return 0;
+  }
+  int no = atoi(args);
+
+  extern WP* find_wp(int no);
+  WP *wp = find_wp(no);
+  if (wp == NULL) {
+    printf("No watchpoint number %d\n", no);
+    return 0;
+  }
+  free_wp(wp);
+  printf("Deleted watchpoint %d\n", no);
+  return 0;
+}
+
+static int cmd_p(char *args) {
+  if (args == NULL) {
+    printf("Usage: p EXPR\n");
+    return 0;
+  }
+  bool success = true;
+  word_t val = expr(args, &success);
+  if (success) {
+    printf("%u\n", val);
+  } else {
+    printf("Invalid expression\n");
+  }
+  return 0;
+}
+
 static int cmd_q(char *args) {
   return -1;
 }
@@ -113,6 +179,9 @@ static struct {
   { "si", "Step N instructions (default 1)", cmd_si },
   { "info", "Print program status (r = registers, w = watchpoints)", cmd_info },
   { "x", "Scan N words of memory starting at EXPR", cmd_x },
+  { "w", "Set a watchpoint for EXPR", cmd_w },
+  { "d", "Delete watchpoint N", cmd_d },
+  { "p", "Evaluate expression EXPR", cmd_p },
   { "q", "Exit NEMU", cmd_q },
 
   /* TODO: Add more commands */

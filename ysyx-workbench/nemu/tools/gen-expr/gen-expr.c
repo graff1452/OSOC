@@ -31,8 +31,66 @@ static char *code_format =
 "  return 0; "
 "}";
 
+static int buf_len = 0;
+
+static void gen(char c) {
+  if (buf_len < sizeof(buf) - 1) {
+    buf[buf_len++] = c;
+    buf[buf_len] = '\0';
+  }
+}
+
+static void gen_str(const char *s) {
+  while (*s) {
+    gen(*s);
+    s++;
+  }
+}
+
+static void gen_num() {
+  int n = rand() % 100;
+  char tmp[16];
+  sprintf(tmp, "%d", n);
+  gen_str(tmp);
+}
+
+static void gen_rand_op() {
+  char ops[] = {'+', '-', '*', '/'};
+  gen(ops[rand() % 4]);
+}
+
+static int depth = 0;
+
+static void gen_rand_expr_helper() {
+  depth++;
+
+  if (depth > 20) {
+    gen_num();
+  }
+  else {
+    switch (rand() % 3) {
+      case 0: gen_num(); break;
+      case 1:
+        gen('(');
+        gen_rand_expr_helper();
+        gen(')');
+        break;
+      default:
+        gen_rand_expr_helper();
+        gen_rand_op();
+        gen_rand_expr_helper();
+        break;
+    }
+  }
+
+  depth--;
+}
+
 static void gen_rand_expr() {
+  buf_len = 0;
   buf[0] = '\0';
+  depth = 0;
+  gen_rand_expr_helper();
 }
 
 int main(int argc, char *argv[]) {
@@ -58,11 +116,13 @@ int main(int argc, char *argv[]) {
 
     fp = popen("/tmp/.expr", "r");
     assert(fp != NULL);
-
     int result;
     ret = fscanf(fp, "%d", &result);
-    pclose(fp);
-
+    int close_status = pclose(fp);
+    if (close_status != 0) {
+      // the expression program crashed (e.g. divide by zero) - skip this case
+      continue;
+    }
     printf("%u %s\n", result, buf);
   }
   return 0;
