@@ -196,7 +196,9 @@ cd ~/Desktop/OSOC/ysyx-workbench
 bash init.sh nemu
 source ~/.bashrc
 sudo apt-get install bison flex libreadline-dev
-# Ubuntu's riscv64-linux-gnu cross-toolchain is missing 32-bit multilib headers:
+sudo apt-get install g++-riscv64-linux-gnu binutils-riscv64-linux-gnu python-is-python3
+# Ubuntu's riscv64-linux-gnu cross-toolchain is missing 32-bit multilib headers
+# (must run AFTER the toolchain is installed above, or stubs.h doesn't exist yet):
 sudo sed -i 's|# include <gnu/stubs-ilp32.h>|// # include <gnu/stubs-ilp32.h>|' \
   /usr/riscv64-linux-gnu/include/gnu/stubs.h
 cd nemu
@@ -206,11 +208,28 @@ make
 ./build/riscv32-nemu-interpreter
 
 # 9. Set up PA2.1 (RV32IM cpu-tests)
-sudo apt-get install g++-riscv64-linux-gnu binutils-riscv64-linux-gnu python-is-python3
 cd ~/Desktop/OSOC/ysyx-workbench
 bash init.sh am-kernels   # if not already cloned in step 3
 cd am-kernels/tests/cpu-tests
-make ARCH=riscv32-nemu run   # one-click regression test, see nemu/ section above
+# Build every test binary (compile only, doesn't run/hang):
+for t in $(basename -s .c tests/*.c); do make ARCH=riscv32-nemu ALL=$t; done
+# Run them all against NEMU in batch mode (-b) and report pass/fail.
+# NOTE: plain `make ARCH=riscv32-nemu run` will HANG here -- NEMU's run target
+# doesn't pass -b by default, so it drops into an interactive prompt waiting on
+# stdin. Implementing default batch mode is a PA2 "required question" I haven't
+# done yet (see "Notes for future me" below) -- until then, use this loop instead:
+cd ~/Desktop/OSOC/ysyx-workbench/nemu
+pass=0; fail=0
+for f in ../am-kernels/tests/cpu-tests/build/*.bin; do
+  name=$(basename "$f" .bin)
+  if timeout 10 ./build/riscv32-nemu-interpreter -b "$f" 2>&1 | grep -q "HIT GOOD TRAP"; then
+    pass=$((pass+1))
+  else
+    fail=$((fail+1)); echo "FAIL: $name"
+  fi
+done
+echo "$pass passed, $fail failed"
+# Expected: 33 passed, 2 failed (hello-str, string -- unimplemented klib, that's PA2.2)
 
 # 10. (Optional) place a legally-obtained ROM to run fceux-am --
 #     nes/rom/ is gitignored, so this has to be done manually every time
