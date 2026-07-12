@@ -72,6 +72,37 @@ and a built-in interactive debugger.
 - `w EXPR` / `d N` / `info w` — full watchpoint system: expression re-evaluated and
   compared every instruction cycle, execution pauses automatically on change
 
+**PA2.1 — Full RV32I + RV32M instruction decoder (complete, 33/33 non-klib
+`cpu-tests` passing):**
+
+Built `nemu/src/isa/riscv32/inst.c` up from a 4-instruction skeleton (`auipc`, `lbu`,
+`sb`, `ebreak`) to the complete RV32I base ISA plus the RV32M extension, driven entirely
+by `cpu-tests` failures (implement only what the next `invalid opcode` error demands).
+
+- All 6 RISC-V instruction formats decoded from raw bit patterns: I, U, S, J, R, B
+  (`decode_operand()` + `imm{I,U,S,J,B}()` macros in `inst.c`)
+- RV32I: full arithmetic/logic (`add/addi`, `sub`, `and/andi`, `or/ori`, `xor/xori`,
+  `slt/slti`, `sltu/sltiu`, `sll/slli`, `srl/srli`, `sra/srai`), all loads/stores at
+  every width incl. sign-extension (`lb/lh/lw/lbu/lhu`, `sb/sh/sw`), both jumps
+  (`jal`, `jalr`), all six branches (`beq/bne/blt/bge/bltu/bgeu`), `lui`
+- RV32M: `mul`, `mulh`, `mulhu` (missing `mulhsu` — unused by any test so far),
+  `div`, `divu`, `rem`, `remu` — including the RISC-V-mandated divide-by-zero and
+  `INT_MIN`/`-1` overflow special cases (result conventions differ between
+  `div`/`divu` and `rem`/`remu` — see comments in `inst.c`)
+
+**Toolchain setup, in addition to the PA1 steps below:**
+```bash
+sudo apt-get install g++-riscv64-linux-gnu binutils-riscv64-linux-gnu python-is-python3
+# Same missing-multilib-header issue as PA1's stubs-ilp32.h fix, applies here too
+# if riscv32 compilation fails with "gnu/stubs-ilp32.h: No such file or directory"
+```
+`am-kernels/tests/cpu-tests/` requires `bash init.sh am-kernels` (see "Related repos"
+below) before any of this can be built or run.
+
+**Not yet done:** `hello-str`/`string` tests still fail — not a decode issue, `klib`
+(`memcpy`/`strcpy`/`sprintf`/etc. in `abstract-machine/klib/src/`) is unimplemented.
+That's PA2.2.
+
 **Real bugs found and fixed along the way** (worth remembering):
 - `init_regex()` was never called in the standalone test harness → segfault inside
   `regexec()` on the *first* token of the *simplest* possible input
@@ -96,7 +127,8 @@ break the normal build), then `make`.
 `ysyx-workbench/`, alongside `abstract-machine/` and `npc/`:
 
 - **[am-kernels](https://github.com/graff1452/am-kernels)** — AM test programs + my own
-  screensaver and GUI-enabled `minirvEMU`
+  screensaver and GUI-enabled `minirvEMU`. Also contains `tests/cpu-tests/`, the RV32IM
+  instruction-decoder test suite used throughout PA2.1.
 - **[fceux-am](https://github.com/graff1452/fceux-am)** — NES emulator ported to AM
 - **[nvboard](https://github.com/graff1452/nvboard)** — virtual FPGA board used to test
   RTL interactively (switches, LEDs, VGA, UART, ...)
@@ -173,9 +205,16 @@ make menuconfig   # Base ISA -> riscv32 (default); leave "Application on
 make
 ./build/riscv32-nemu-interpreter
 
-# 9. (Optional) place a legally-obtained ROM to run fceux-am --
-#    nes/rom/ is gitignored, so this has to be done manually every time
-#    fceux-am/nes/rom/<name>.nes
+# 9. Set up PA2.1 (RV32IM cpu-tests)
+sudo apt-get install g++-riscv64-linux-gnu binutils-riscv64-linux-gnu python-is-python3
+cd ~/Desktop/OSOC/ysyx-workbench
+bash init.sh am-kernels   # if not already cloned in step 3
+cd am-kernels/tests/cpu-tests
+make ARCH=riscv32-nemu run   # one-click regression test, see nemu/ section above
+
+# 10. (Optional) place a legally-obtained ROM to run fceux-am --
+#     nes/rom/ is gitignored, so this has to be done manually every time
+#     fceux-am/nes/rom/<name>.nes
 ```
 
 For any *other* `init.sh` subprojects not yet needed (`npc-chisel`, ...), just
@@ -192,3 +231,7 @@ anywhere and always come straight from upstream.
 - `npc/**/obj_dir/` (Verilator build output) and `npc/**/*.fst` (waveform traces) are
   gitignored — regenerate with `make`, don't expect them to be present after a fresh
   clone.
+- NEMU's `make run` doesn't pass `-b` (batch mode) by default, so it drops into an
+  interactive `(nemu)` prompt and will hang if run non-interactively. Run
+  `./build/riscv32-nemu-interpreter -b <image>.bin` directly instead, or fix the
+  Makefile to default to batch mode (a PA2 "required question" I haven't done yet).
