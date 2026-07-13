@@ -2,7 +2,8 @@
 
 Personal coursework repository for the "一生一芯" (ysyx / One Student One Chip) program.
 
-**Jump to:** [Build NEMU](#build-nemu-one-time) · [Testing guide — verify everything](#testing-guide--verify-everything) ·
+**Jump to:** [What is this?](#what-is-this-project-in-plain-terms) ·
+[Build NEMU](#build-nemu-one-time) · [Testing guide — verify everything](#testing-guide--verify-everything) ·
 [Structure](#structure) ·
 [F6 (Logisim)](#f--f6-mini-risc-v-processor-logisim) ·
 [E-phase sims](#e--e-phase-instruction-set-simulators) ·
@@ -11,6 +12,52 @@ Personal coursework repository for the "一生一芯" (ysyx / One Student One Ch
 [Related repos](#related-repos-not-included-here) ·
 [Full setup from scratch](#full-setup-on-a-brand-new-device) ·
 [Notes for future me](#notes-for-future-me)
+
+## What is this project, in plain terms?
+
+This repo is a series of exercises in building a **computer, entirely in software,
+from the ground up** — no physical chip involved (yet — that comes later in the
+course). Each piece below builds on the last:
+
+- **NEMU** — a program that pretends to be a RISC-V processor. Real CPUs are physical
+  circuits; NEMU is the same behavior written in C instead, running on a normal
+  laptop. You feed it a compiled program (a `.bin` file), and it reads that program's
+  instructions one at a time and simulates doing whatever each one says — add these
+  numbers, jump to this address, read this memory, etc.
+- **The instruction decoder** (`nemu/src/isa/riscv32/inst.c`) — NEMU's "dictionary."
+  Every RISC-V instruction is really just a specific pattern of 32 ones and zeros.
+  This file is a big list of rules: "if the bits look like *this*, it means *add two
+  numbers*"; "if they look like *that*, it means *jump*." Teaching NEMU every rule in
+  the RISC-V instruction set (RV32I + RV32M) was PA2.1.
+- **AM (Abstract Machine)** — real programs (even something as simple as
+  `printf("hello")`) need more than raw instructions; they need a way to print
+  characters, know what time it is, read a keyboard, draw to a screen, and so on. AM
+  is a small, fixed set of functions (`halt()`, `putch()`, `io_read()`, ...) that any
+  program can call to get those things — and it's AM's job, not the program's, to
+  know the specific hardware details of *how* to actually talk to a keyboard/screen/
+  clock on whatever machine it's running on. Writing the actual code behind those AM
+  functions for NEMU specifically (reading the real keyboard, drawing real pixels,
+  etc.) was PA2.2.
+- **klib** — a small stripped-down copy of the standard C library (`strlen`,
+  `memcpy`, `printf`, `malloc`, ...) written completely from scratch, since NEMU is a
+  "bare metal" environment with no operating system underneath it to provide these
+  for free the way a normal program on your laptop gets them.
+- **IOE (I/O Extension)** — the part of AM specifically about talking to devices:
+  the clock (timer), keyboard, screen (VGA), and speaker (audio). Each device is
+  "wired in" by reading and writing specific memory addresses that NEMU treats
+  specially (called MMIO — memory-mapped I/O) rather than as ordinary RAM.
+- **`cpu-tests` / `am-tests`** — pre-written test programs (someone else wrote these,
+  not me) that get compiled and run *inside* NEMU. If NEMU's instruction decoder or
+  AM implementation has a bug, these tests fail in an obvious way (wrong output,
+  crash, or NEMU reports `HIT BAD TRAP` instead of `HIT GOOD TRAP`) — they're how I
+  know the work above is actually correct, not just "looks right."
+- **DiffTest** (not done yet) — running the *same* program on NEMU and on a
+  second, independently-written, trusted RISC-V simulator (Spike) side by side,
+  comparing their results after every single instruction. Catches subtle bugs that
+  the test programs above don't happen to exercise.
+
+The rest of this README (F6, E-phase, NPC) covers earlier/parallel stages of the same
+course, described in their own sections below.
 
 ## Build NEMU (one-time)
 
