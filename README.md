@@ -2,7 +2,8 @@
 
 Personal coursework repository for the "一生一芯" (ysyx / One Student One Chip) program.
 
-**Jump to:** [Quick start](#quick-start) · [Structure](#structure) ·
+**Jump to:** [Build NEMU](#build-nemu-one-time) · [Testing guide — verify everything](#testing-guide--verify-everything) ·
+[Structure](#structure) ·
 [F6 (Logisim)](#f--f6-mini-risc-v-processor-logisim) ·
 [E-phase sims](#e--e-phase-instruction-set-simulators) ·
 [NPC (RTL)](#npc--rtl-reimplementation-d4e5-in-progress) ·
@@ -11,16 +12,16 @@ Personal coursework repository for the "一生一芯" (ysyx / One Student One Ch
 [Full setup from scratch](#full-setup-on-a-brand-new-device) ·
 [Notes for future me](#notes-for-future-me)
 
-## Quick start
+## Build NEMU (one-time)
 
-**To just get NEMU running and confirm everything passes** (assumes Ubuntu, a fresh
-clone, SSH key already set up on GitHub — see "Full setup on a brand-new device" below
-if any of that isn't true yet):
+Assumes Ubuntu, a fresh clone of this repo, SSH key already set up on GitHub — see
+["Full setup on a brand-new device"](#full-setup-on-a-brand-new-device) below if any
+of that isn't true yet.
 
 ```bash
 cd ~/Desktop/OSOC/ysyx-workbench
 
-# one-time OS packages
+# one-time OS packages -- covers everything below (cpu-tests, IOE devices, malloc/demo)
 sudo apt-get install bison flex libreadline-dev python-is-python3 \
   g++-riscv64-linux-gnu binutils-riscv64-linux-gnu \
   libsdl2-dev libsdl2-image-dev libsdl2-ttf-dev
@@ -33,11 +34,31 @@ make menuconfig   # Base ISA -> riscv32 (default). Turn ON: Devices.
                   # Leave "Application on Abstract-Machine" UNSELECTED.
 make
 
-# pull in and run the RV32IM test suite (35/35 should pass)
+# pull in the test/demo sources this whole guide uses
 cd ~/Desktop/OSOC/ysyx-workbench
 bash init.sh am-kernels
-cd am-kernels/tests/cpu-tests
+```
+
+**Two things that WILL bite you if skipped — read before running anything below:**
+- `make ARCH=riscv32-nemu run` (and any use of `run`) **hangs** — NEMU's `run` target
+  isn't batch-mode by default, so it sits waiting on stdin forever. **Every command in
+  this guide runs the compiled `.bin` directly with `-b` instead** — never use `run`.
+- Any test that reads `mainargs` (every command below except the plain `cpu-tests`
+  suite) needs one **extra explicit step** after building —
+  `make ARCH=riscv32-nemu mainargs=<x> insert-arg` — or the *old* `mainargs` value
+  silently stays baked into the binary, which looks exactly like "my change did
+  nothing." Every command below already includes this step where needed.
+
+## Testing guide — verify everything
+
+Run these in order. Each one tells you exactly what a correct result looks like.
+
+### 1. RV32I + RV32M instruction decoder — 35/35 `cpu-tests`
+
+```bash
+cd ~/Desktop/OSOC/ysyx-workbench/am-kernels/tests/cpu-tests
 for t in $(basename -s .c tests/*.c); do make ARCH=riscv32-nemu ALL=$t; done
+
 cd ~/Desktop/OSOC/ysyx-workbench/nemu
 pass=0; fail=0
 for f in ../am-kernels/tests/cpu-tests/build/*.bin; do
@@ -47,19 +68,91 @@ for f in ../am-kernels/tests/cpu-tests/build/*.bin; do
     fail=$((fail+1)); echo "FAIL: $(basename "$f" .bin)"
   fi
 done
-echo "$pass passed, $fail failed"   # expect: 35 passed, 0 failed
+echo "$pass passed, $fail failed"
 ```
+**Expect:** `35 passed, 0 failed`.
 
-**Two things that WILL bite you if skipped, both covered in "Notes for future me" below:**
-- `make ARCH=riscv32-nemu run` **hangs** (NEMU's `run` target isn't batch-mode by
-  default) — always run the compiled `.bin` directly with `-b`, as above.
-- Any test that takes `mainargs` (keyboard/VGA/audio, not just `hello`) needs an
-  extra explicit step — `make ARCH=riscv32-nemu mainargs=<x> insert-arg` — or the old
-  `mainargs` value silently stays baked into the binary. See "PA2.2 gotcha" in the
-  progress log below for the full explanation.
+### 2. `klib` string/stdio — already covered by test 1 above
 
-For everything else (running `am-tests` devices individually, NPC/RTL, synthesis) see
-the relevant subsection below, or the full from-scratch setup script further down.
+`string` and `hello-str` are two of the 35 tests above; no separate step needed.
+
+### 3. Timer (`AM_TIMER_UPTIME`)
+
+```bash
+cd ~/Desktop/OSOC/ysyx-workbench/am-kernels/tests/am-tests
+rm -rf build
+make ARCH=riscv32-nemu mainargs=t
+make ARCH=riscv32-nemu mainargs=t insert-arg
+
+cd ~/Desktop/OSOC/ysyx-workbench/nemu
+timeout 5 ./build/riscv32-nemu-interpreter -b ../am-kernels/tests/am-tests/build/amtest-riscv32-nemu.bin
+```
+**Expect:** a new line printed roughly once per real second
+(`1900-0-0 2d:2d:2d GMT (1 second).`, `(2 seconds).`, ...). The date is a placeholder
+(`AM_TIMER_RTC` isn't implemented) — that's expected; what matters is a new line each
+second.
+
+### 4. Keyboard (`AM_INPUT_KEYBRD`)
+
+```bash
+cd ~/Desktop/OSOC/ysyx-workbench/am-kernels/tests/am-tests
+rm -rf build
+make ARCH=riscv32-nemu mainargs=k
+make ARCH=riscv32-nemu mainargs=k insert-arg
+
+cd ~/Desktop/OSOC/ysyx-workbench/nemu
+./build/riscv32-nemu-interpreter -b ../am-kernels/tests/am-tests/build/amtest-riscv32-nemu.bin > /tmp/trace.txt
+```
+A window pops up — **click into it** for keyboard focus, then press some keys, then
+`Ctrl+C` to stop. **Expect:** lines like `Got (kbd): UP (73) DOWN` / `... UP` for each
+press/release.
+
+### 5. VGA (`AM_GPU_CONFIG` / `AM_GPU_FBDRAW`)
+
+```bash
+cd ~/Desktop/OSOC/ysyx-workbench/am-kernels/tests/am-tests
+rm -rf build
+make ARCH=riscv32-nemu mainargs=v
+make ARCH=riscv32-nemu mainargs=v insert-arg
+
+cd ~/Desktop/OSOC/ysyx-workbench/nemu
+./build/riscv32-nemu-interpreter -b ../am-kernels/tests/am-tests/build/amtest-riscv32-nemu.bin > /tmp/trace.txt
+```
+**Expect:** the popup window shows a live colored animation (a filled snake-like
+pattern moving through a 32x32 grid), not a black screen. Terminal prints
+`FPS = 3` (or similar) once per second. `Ctrl+C` to stop.
+
+### 6. Audio (`AM_AUDIO_*`) — optional per the handout, implemented anyway
+
+**Turn your volume down first** — a broken implementation can produce loud white noise.
+```bash
+cd ~/Desktop/OSOC/ysyx-workbench/am-kernels/tests/am-tests
+rm -rf build
+make ARCH=riscv32-nemu mainargs=a
+make ARCH=riscv32-nemu mainargs=a insert-arg
+
+cd ~/Desktop/OSOC/ysyx-workbench/nemu
+./build/riscv32-nemu-interpreter -b ../am-kernels/tests/am-tests/build/amtest-riscv32-nemu.bin > /tmp/trace.txt
+```
+**Expect:** an audible "Twinkle Twinkle Little Star" melody plays; terminal shows
+`Already play <N>/56844 bytes of data` counting up to completion.
+
+### 7. `malloc`/`free` — Tower of Hanoi demo
+
+```bash
+cd ~/Desktop/OSOC/ysyx-workbench/am-kernels/kernels/demo
+rm -rf build
+make ARCH=riscv32-nemu mainargs=3
+make ARCH=riscv32-nemu mainargs=3 insert-arg
+
+cd ~/Desktop/OSOC/ysyx-workbench/nemu
+./build/riscv32-nemu-interpreter -b ../am-kernels/kernels/demo/build/demo-riscv32-nemu.bin > /tmp/trace.txt
+```
+**Expect:** a window shows the Tower of Hanoi animation (a pyramid of disks moving
+between three pegs). Press `Q` in the window to exit cleanly.
+
+**Not yet implemented / no test to run:** trace infrastructure (`iringbuf`/`mtrace`/
+`ftrace`), DiffTest against Spike — see the PA2.2 detail log further below for status.
 
 ## Structure
 
@@ -117,7 +210,8 @@ course, integrated into ysyx as its own stage. Conceptually the same idea as
 `e4/minirv/minirvemu.c`, just the professional, more complete version with a real ISA
 and a built-in interactive debugger.
 
-**For "how do I build and run this," see Quick Start at the top of this file.**
+**For "how do I build and test this," see [Build NEMU](#build-nemu-one-time) and the
+[Testing guide](#testing-guide--verify-everything) at the top of this file.**
 Everything below is a detailed log of what's implemented, why, and bugs found along
 the way — useful for picking a task back up or debugging, not required reading to
 get NEMU running.
@@ -328,46 +422,27 @@ sudo apt-get install libunwind-dev liblzma-dev
 make init
 echo exit | ./bin/iEDA -v
 
-# 8. Set up NEMU (E6/PA1)
+# 8. Set up NEMU (E6/PA1) and PA2 (RV32IM decoder, klib, IOE, malloc)
 cd ~/Desktop/OSOC/ysyx-workbench
 bash init.sh nemu
 source ~/.bashrc
 sudo apt-get install bison flex libreadline-dev
 sudo apt-get install g++-riscv64-linux-gnu binutils-riscv64-linux-gnu python-is-python3
+sudo apt-get install libsdl2-dev libsdl2-image-dev libsdl2-ttf-dev
 # Ubuntu's riscv64-linux-gnu cross-toolchain is missing 32-bit multilib headers
 # (must run AFTER the toolchain is installed above, or stubs.h doesn't exist yet):
 sudo sed -i 's|# include <gnu/stubs-ilp32.h>|// # include <gnu/stubs-ilp32.h>|' \
   /usr/riscv64-linux-gnu/include/gnu/stubs.h
 cd nemu
-make menuconfig   # Base ISA -> riscv32 (default); leave "Application on
-                  # Abstract-Machine" UNSELECTED, or the build breaks
+make menuconfig   # Base ISA -> riscv32 (default); turn ON Devices; leave
+                  # "Application on Abstract-Machine" UNSELECTED, or the build breaks
 make
 ./build/riscv32-nemu-interpreter
 
-# 9. Set up PA2.1 (RV32IM cpu-tests)
-cd ~/Desktop/OSOC/ysyx-workbench
+# 9. Pull in the test/demo sources, then see "Testing guide -- verify everything"
+#    near the top of this file for the full set of commands (cpu-tests, timer,
+#    keyboard, VGA, audio, malloc/hanoi demo) and what each one should show you.
 bash init.sh am-kernels   # if not already cloned in step 3
-cd am-kernels/tests/cpu-tests
-# Build every test binary (compile only, doesn't run/hang):
-for t in $(basename -s .c tests/*.c); do make ARCH=riscv32-nemu ALL=$t; done
-# Run them all against NEMU in batch mode (-b) and report pass/fail.
-# NOTE: plain `make ARCH=riscv32-nemu run` will HANG here -- NEMU's run target
-# doesn't pass -b by default, so it drops into an interactive prompt waiting on
-# stdin. Implementing default batch mode is a PA2 "required question" I haven't
-# done yet (see "Notes for future me" below) -- until then, use this loop instead:
-cd ~/Desktop/OSOC/ysyx-workbench/nemu
-pass=0; fail=0
-for f in ../am-kernels/tests/cpu-tests/build/*.bin; do
-  name=$(basename "$f" .bin)
-  if timeout 10 ./build/riscv32-nemu-interpreter -b "$f" 2>&1 | grep -q "HIT GOOD TRAP"; then
-    pass=$((pass+1))
-  else
-    fail=$((fail+1)); echo "FAIL: $name"
-  fi
-done
-echo "$pass passed, $fail failed"
-# Expected: 35 passed, 0 failed (klib's string.c/stdio.c are implemented and
-# committed too, so string/hello-str pass along with everything else)
 
 # 10. (Optional) place a legally-obtained ROM to run fceux-am --
 #     nes/rom/ is gitignored, so this has to be done manually every time
