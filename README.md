@@ -114,9 +114,38 @@ all-stub, every function calling `panic("Not implemented")`):
 **35/35 `cpu-tests` now passing** — `string`/`hello-str` were the last two, both
 blocked purely on the two files above, no decoder-side gap.
 
-**Still to do for PA2.2:** trace infrastructure (`iringbuf`, `mtrace`, `ftrace` —
-`itrace` already exists in the framework code), DiffTest wiring against Spike for
-instruction-level correctness verification beyond what `cpu-tests` happens to exercise.
+**IOE (I/O Extension), in `abstract-machine/am/src/platform/nemu/ioe/`:**
+
+- `timer.c` — `__am_timer_uptime()` was a stub always returning `0`; now reads NEMU's
+  RTC MMIO register as two 32-bit halves (`RTC_ADDR`, `RTC_ADDR+4`) and combines them
+  into one `uint64_t` microsecond count (casting the high half to `uint64_t` *before*
+  shifting left 32 — shifting a still-32-bit value left by 32 is itself UB). Verified
+  with `am-tests` (`mainargs=t`): prints a new line every real second.
+- `input.c` — `__am_input_keybrd()` was a stub always reporting "no key"; now reads
+  the keyboard MMIO register at `KBD_ADDR`. Bit 15 (`KEYDOWN_MASK`, `0x8000`) is the
+  press/release flag; the rest of the bits (`code & ~KEYDOWN_MASK`) are the key code.
+  Verified with `am-tests` (`mainargs=k`): real key press/release events come through.
+
+**Gotcha discovered along the way — `mainargs` for `$ISA-nemu` builds:** unlike Spike
+builds (which bake `mainargs` in via `-DMAINARGS`), `$ISA-nemu` builds patch it
+*post-link* directly into the compiled `.bin`, via a Python script
+(`abstract-machine/tools/insert-arg.py`) invoked by an `insert-arg` Makefile target.
+That target only runs automatically as a prerequisite of `make run` — which we avoid
+(see the batch-mode-hang note below/in "Notes for future me"). So when testing
+anything that needs `mainargs` (keyboard/VGA/audio tests, not just `hello`), run it
+explicitly:
+```bash
+make ARCH=riscv32-nemu mainargs=<char-or-string> insert-arg
+```
+Also needs `python-is-python3` (same fix as noted elsewhere in this README) — without
+it, `insert-arg` fails with `python: not found` and **silently leaves the old
+`mainargs` value baked into the binary**, which looks exactly like "my code change
+did nothing" and is easy to misdiagnose as a logic bug instead of a missing build step.
+
+**Still to do for PA2.2:** VGA (`AM_GPU_FBDRAW`), audio (optional), `malloc`/`free`,
+trace infrastructure (`iringbuf`, `mtrace`, `ftrace` — `itrace` already exists in the
+framework code), DiffTest wiring against Spike for instruction-level correctness
+verification beyond what `cpu-tests` happens to exercise.
 
 **Real bugs found and fixed along the way** (worth remembering):
 - `init_regex()` was never called in the standalone test harness → segfault inside
