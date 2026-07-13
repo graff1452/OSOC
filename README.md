@@ -2,6 +2,65 @@
 
 Personal coursework repository for the "一生一芯" (ysyx / One Student One Chip) program.
 
+**Jump to:** [Quick start](#quick-start) · [Structure](#structure) ·
+[F6 (Logisim)](#f--f6-mini-risc-v-processor-logisim) ·
+[E-phase sims](#e--e-phase-instruction-set-simulators) ·
+[NPC (RTL)](#npc--rtl-reimplementation-d4e5-in-progress) ·
+[NEMU / PA1 & PA2 detail log](#nemu--e6pa1--pa2-njus-ics-simple-debugger--rv32im-computer-system) ·
+[Related repos](#related-repos-not-included-here) ·
+[Full setup from scratch](#full-setup-on-a-brand-new-device) ·
+[Notes for future me](#notes-for-future-me)
+
+## Quick start
+
+**To just get NEMU running and confirm everything passes** (assumes Ubuntu, a fresh
+clone, SSH key already set up on GitHub — see "Full setup on a brand-new device" below
+if any of that isn't true yet):
+
+```bash
+cd ~/Desktop/OSOC/ysyx-workbench
+
+# one-time OS packages
+sudo apt-get install bison flex libreadline-dev python-is-python3 \
+  g++-riscv64-linux-gnu binutils-riscv64-linux-gnu \
+  libsdl2-dev libsdl2-image-dev libsdl2-ttf-dev
+sudo sed -i 's|# include <gnu/stubs-ilp32.h>|// # include <gnu/stubs-ilp32.h>|' \
+  /usr/riscv64-linux-gnu/include/gnu/stubs.h
+
+# build NEMU
+cd nemu
+make menuconfig   # Base ISA -> riscv32 (default). Turn ON: Devices.
+                  # Leave "Application on Abstract-Machine" UNSELECTED.
+make
+
+# pull in and run the RV32IM test suite (35/35 should pass)
+cd ~/Desktop/OSOC/ysyx-workbench
+bash init.sh am-kernels
+cd am-kernels/tests/cpu-tests
+for t in $(basename -s .c tests/*.c); do make ARCH=riscv32-nemu ALL=$t; done
+cd ~/Desktop/OSOC/ysyx-workbench/nemu
+pass=0; fail=0
+for f in ../am-kernels/tests/cpu-tests/build/*.bin; do
+  if timeout 10 ./build/riscv32-nemu-interpreter -b "$f" 2>&1 | grep -q "HIT GOOD TRAP"; then
+    pass=$((pass+1))
+  else
+    fail=$((fail+1)); echo "FAIL: $(basename "$f" .bin)"
+  fi
+done
+echo "$pass passed, $fail failed"   # expect: 35 passed, 0 failed
+```
+
+**Two things that WILL bite you if skipped, both covered in "Notes for future me" below:**
+- `make ARCH=riscv32-nemu run` **hangs** (NEMU's `run` target isn't batch-mode by
+  default) — always run the compiled `.bin` directly with `-b`, as above.
+- Any test that takes `mainargs` (keyboard/VGA/audio, not just `hello`) needs an
+  extra explicit step — `make ARCH=riscv32-nemu mainargs=<x> insert-arg` — or the old
+  `mainargs` value silently stays baked into the binary. See "PA2.2 gotcha" in the
+  progress log below for the full explanation.
+
+For everything else (running `am-tests` devices individually, NPC/RTL, synthesis) see
+the relevant subsection below, or the full from-scratch setup script further down.
+
 ## Structure
 
 ```
@@ -50,13 +109,18 @@ verified with Verilator and (for interactive testing) NVBoard. See
 [`npc/README.md`](ysyx-workbench/npc/README.md) for the full breakdown of what's in
 each subfolder (`xor-test/`, `nvboard-xor/`, `nvboard-light/`) and how to run them.
 
-### `nemu/` — E6/PA1: NJU's ICS Simple Debugger (complete)
+### `nemu/` — E6/PA1 & PA2: NJU's ICS Simple Debugger + RV32IM Computer System
 
 [NEMU](https://github.com/NJU-ProjectN/nemu) — a from-scratch RISC-V (`riscv32`)
 instruction set simulator from Nanjing University's "Computer Systems Fundamentals"
 course, integrated into ysyx as its own stage. Conceptually the same idea as
 `e4/minirv/minirvemu.c`, just the professional, more complete version with a real ISA
 and a built-in interactive debugger.
+
+**For "how do I build and run this," see Quick Start at the top of this file.**
+Everything below is a detailed log of what's implemented, why, and bugs found along
+the way — useful for picking a task back up or debugging, not required reading to
+get NEMU running.
 
 **All of PA1 implemented and tested:**
 - `si [N]` — single-step N instructions (default 1)
