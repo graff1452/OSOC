@@ -72,8 +72,7 @@ and a built-in interactive debugger.
 - `w EXPR` / `d N` / `info w` — full watchpoint system: expression re-evaluated and
   compared every instruction cycle, execution pauses automatically on change
 
-**PA2.1 — Full RV32I + RV32M instruction decoder (complete, 33/33 non-klib
-`cpu-tests` passing):**
+**PA2.1 — Full RV32I + RV32M instruction decoder (complete):**
 
 Built `nemu/src/isa/riscv32/inst.c` up from a 4-instruction skeleton (`auipc`, `lbu`,
 `sb`, `ebreak`) to the complete RV32I base ISA plus the RV32M extension, driven entirely
@@ -99,9 +98,25 @@ sudo apt-get install g++-riscv64-linux-gnu binutils-riscv64-linux-gnu python-is-
 `am-kernels/tests/cpu-tests/` requires `bash init.sh am-kernels` (see "Related repos"
 below) before any of this can be built or run.
 
-**Not yet done:** `hello-str`/`string` tests still fail — not a decode issue, `klib`
-(`memcpy`/`strcpy`/`sprintf`/etc. in `abstract-machine/klib/src/`) is unimplemented.
-That's PA2.2.
+**PA2.2 (in progress) — klib, infrastructure, DiffTest:**
+
+`abstract-machine/klib/src/string.c` and `stdio.c` implemented (both were previously
+all-stub, every function calling `panic("Not implemented")`):
+
+- `string.c`: `strlen`, `strcpy`, `strncpy`, `strcat`, `strcmp`, `strncmp`, `memset`,
+  `memmove` (handles overlapping regions correctly by choosing copy direction based
+  on relative pointer position — the one function here that genuinely needs it),
+  `memcpy`, `memcmp`
+- `stdio.c`: `vsprintf` (`%s`/`%d` only, per handout scope — `%d` implemented by hand
+  via repeated `% 10`/`/ 10` digit extraction, no library shortcut), with `sprintf`,
+  `printf`, `vsnprintf`, `snprintf` all built as thin wrappers around it
+
+**35/35 `cpu-tests` now passing** — `string`/`hello-str` were the last two, both
+blocked purely on the two files above, no decoder-side gap.
+
+**Still to do for PA2.2:** trace infrastructure (`iringbuf`, `mtrace`, `ftrace` —
+`itrace` already exists in the framework code), DiffTest wiring against Spike for
+instruction-level correctness verification beyond what `cpu-tests` happens to exercise.
 
 **Real bugs found and fixed along the way** (worth remembering):
 - `init_regex()` was never called in the standalone test harness → segfault inside
@@ -229,7 +244,8 @@ for f in ../am-kernels/tests/cpu-tests/build/*.bin; do
   fi
 done
 echo "$pass passed, $fail failed"
-# Expected: 33 passed, 2 failed (hello-str, string -- unimplemented klib, that's PA2.2)
+# Expected: 35 passed, 0 failed (klib's string.c/stdio.c are implemented and
+# committed too, so string/hello-str pass along with everything else)
 
 # 10. (Optional) place a legally-obtained ROM to run fceux-am --
 #     nes/rom/ is gitignored, so this has to be done manually every time
