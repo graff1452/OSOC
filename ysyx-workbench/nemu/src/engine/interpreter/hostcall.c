@@ -47,5 +47,11 @@ void invalid_inst(vaddr_t thispc) {
         "* The machine is always right!\n"
         "* Every line of untested code is always wrong!\n\n", ANSI_FG_RED), isa_logo);
 
+#ifdef CONFIG_IRINGBUF
+  extern void display_iringbuf();
+  printf("\nMost recent instructions executed:\n");
+  display_iringbuf();
+#endif
+
   set_nemu_state(NEMU_ABORT, thispc, -1);
 }

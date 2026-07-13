@@ -36,6 +36,23 @@ void device_update();
 extern WP* get_wp_head();
 word_t expr(char *e, bool *success);
 
+#ifdef CONFIG_IRINGBUF
+static char iringbuf[CONFIG_IRINGBUF_SIZE][128];
+static int iringbuf_idx = 0;
+static int iringbuf_count = 0;
+
+void display_iringbuf() {
+  int n = iringbuf_count < CONFIG_IRINGBUF_SIZE ? iringbuf_count : CONFIG_IRINGBUF_SIZE;
+  int start = (iringbuf_idx - n + CONFIG_IRINGBUF_SIZE) % CONFIG_IRINGBUF_SIZE;
+  int i;
+  for (i = 0; i < n; i++) {
+    int idx = (start + i) % CONFIG_IRINGBUF_SIZE;
+    bool is_last = (i == n - 1);
+    printf("%s %s\n", is_last ? "-->" : "   ", iringbuf[idx]);
+  }
+}
+#endif
+
 static void check_watchpoints() {
   WP *p = get_wp_head();
   while (p != NULL) {
@@ -55,6 +72,11 @@ static void check_watchpoints() {
 static void trace_and_difftest(Decode *_this, vaddr_t dnpc) {
 #ifdef CONFIG_ITRACE_COND
   if (ITRACE_COND) { log_write("%s\n", _this->logbuf); }
+#endif
+#ifdef CONFIG_IRINGBUF
+  snprintf(iringbuf[iringbuf_idx], sizeof(iringbuf[0]), "%s", _this->logbuf);
+  iringbuf_idx = (iringbuf_idx + 1) % CONFIG_IRINGBUF_SIZE;
+  iringbuf_count++;
 #endif
   if (g_print_step) { IFDEF(CONFIG_ITRACE, puts(_this->logbuf)); }
   IFDEF(CONFIG_DIFFTEST, difftest_step(_this->pc, dnpc));
