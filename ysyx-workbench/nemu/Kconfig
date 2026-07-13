@@ -161,6 +161,16 @@ config IRINGBUF_SIZE
   int "Number of instructions kept in the ring buffer"
   default 16
 
+config MTRACE
+  depends on TRACE
+  bool "Enable memory access tracer"
+  default y
+
+config MTRACE_COND
+  depends on MTRACE
+  string "Only trace memory accesses when the condition is true (address range, e.g. addr >= 0x80000000)"
+  default "true"
+
 config DIFFTEST
   depends on TARGET_NATIVE_ELF
   bool "Enable differential testing"
