@@ -30,13 +30,17 @@ int atoi(const char* nptr) {
 }
 
 void *malloc(size_t size) {
-  // On native, malloc() will be called during initializaion of C runtime.
-  // Therefore do not call panic() here, else it will yield a dead recursion:
-  //   panic() -> putchar() -> (glibc) -> malloc() -> panic()
 #if !(defined(__ISA_NATIVE__) && defined(__NATIVE_USE_KLIB__))
-  panic("Not implemented");
-#endif
+  static uintptr_t addr = 0;
+  if (addr == 0) addr = (uintptr_t)heap.start;
+
+  size = (size + 7) & ~(size_t)7; // round up to a multiple of 8 for alignment
+  void *ret = (void *)addr;
+  addr += size;
+  return ret;
+#else
   return NULL;
+#endif
 }
 
 void free(void *ptr) {
