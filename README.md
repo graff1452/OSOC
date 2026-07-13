@@ -125,6 +125,35 @@ blocked purely on the two files above, no decoder-side gap.
   the keyboard MMIO register at `KBD_ADDR`. Bit 15 (`KEYDOWN_MASK`, `0x8000`) is the
   press/release flag; the rest of the bits (`code & ~KEYDOWN_MASK`) are the key code.
   Verified with `am-tests` (`mainargs=k`): real key press/release events come through.
+- `gpu.c` — `__am_gpu_config()` was hardcoded to `width=0, height=0`; now reads the
+  real screen size from `VGACTL_ADDR` (width in upper 16 bits, height in lower 16,
+  per NEMU's `init_vga()`). `__am_gpu_fbdraw()` only handled the `sync` flag and never
+  wrote any pixel data; now copies the caller's `w*h` pixel block into the framebuffer
+  at `FB_ADDR`, computing each destination row with the *screen's* width (not the
+  block's own width), since the framebuffer is one row-major array spanning the
+  whole screen.
+- `audio.c` (optional per handout) — was fully stubbed (`present=false`, all writes
+  no-ops). Implemented `__am_audio_config/ctrl/status/play`; `play` is the interesting
+  one — copies PCM data into the stream buffer in chunks, polling `AUDIO_COUNT_ADDR`
+  and waiting whenever the buffer is full, tracking its own write position with
+  wraparound (clamping each `memcpy` so it never crosses the buffer's physical end
+  in one call, since the buffer is a flat region, not something `memcpy` understands
+  as circular on its own).
+
+**Also found and fixed two real bugs in NEMU itself, not just AM stubs:**
+- `nemu/src/device/vga.c`'s `vga_update_screen()` was an empty `// TODO` — `gpu.c`
+  was correctly signaling "frame ready" via the sync register, but nothing on the
+  NEMU side ever checked it or pushed the framebuffer to the actual SDL window.
+  Symptom was misleading: the AM-side FPS counter incremented normally (logic was
+  fine), but the window stayed solid black — looked like an AM-side bug, wasn't.
+- `nemu/src/device/audio.c`'s stream-buffer MMIO mapping had `NULL` as its write
+  handler — meaning nothing ever tracked how many bytes AM had written into the
+  buffer, so `AM_AUDIO_PLAY`'s wait-for-free-space logic had no real data to poll.
+  Added a `sbuf_io_handler()` that increments a byte counter on every write.
+
+**Verified**: `am-tests` `mainargs=v` renders live animation in the popup window;
+`mainargs=a` plays the built-in "Twinkle Twinkle Little Star" PCM data through to
+completion with an audible, recognizable melody.
 
 **Gotcha discovered along the way — `mainargs` for `$ISA-nemu` builds:** unlike Spike
 builds (which bake `mainargs` in via `-DMAINARGS`), `$ISA-nemu` builds patch it
@@ -142,10 +171,10 @@ it, `insert-arg` fails with `python: not found` and **silently leaves the old
 `mainargs` value baked into the binary**, which looks exactly like "my code change
 did nothing" and is easy to misdiagnose as a logic bug instead of a missing build step.
 
-**Still to do for PA2.2:** VGA (`AM_GPU_FBDRAW`), audio (optional), `malloc`/`free`,
-trace infrastructure (`iringbuf`, `mtrace`, `ftrace` — `itrace` already exists in the
-framework code), DiffTest wiring against Spike for instruction-level correctness
-verification beyond what `cpu-tests` happens to exercise.
+**Still to do for PA2.2:** `malloc`/`free`, trace infrastructure (`iringbuf`,
+`mtrace`, `ftrace` — `itrace` already exists in the framework code), DiffTest wiring
+against Spike for instruction-level correctness verification beyond what `cpu-tests`
+happens to exercise.
 
 **Real bugs found and fixed along the way** (worth remembering):
 - `init_regex()` was never called in the standalone test harness → segfault inside
