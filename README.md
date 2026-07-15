@@ -51,10 +51,14 @@ course). Each piece below builds on the last:
   AM implementation has a bug, these tests fail in an obvious way (wrong output,
   crash, or NEMU reports `HIT BAD TRAP` instead of `HIT GOOD TRAP`) — they're how I
   know the work above is actually correct, not just "looks right."
-- **DiffTest** (not done yet) — running the *same* program on NEMU and on a
-  second, independently-written, trusted RISC-V simulator (Spike) side by side,
-  comparing their results after every single instruction. Catches subtle bugs that
-  the test programs above don't happen to exercise.
+- **DiffTest** — running the *same* program on NEMU and on a second,
+  independently-written, trusted RISC-V simulator (Spike) side by side, comparing
+  their results after every single instruction. Catches subtle bugs that the test
+  programs above don't happen to exercise.
+- **Trace tools** (`iringbuf`, `mtrace`, `ftrace`) — different ways of recording
+  *what actually happened* while a program ran, for debugging: recent instruction
+  history, every memory read/write, or a readable function-call tree. None of these
+  change NEMU's behavior — they're just windows into what it's already doing.
 
 The rest of this README (F6, E-phase, NPC) covers earlier/parallel stages of the same
 course, described in their own sections below.
@@ -198,8 +202,50 @@ cd ~/Desktop/OSOC/ysyx-workbench/nemu
 **Expect:** a window shows the Tower of Hanoi animation (a pyramid of disks moving
 between three pegs). Press `Q` in the window to exit cleanly.
 
-**Not yet implemented / no test to run:** trace infrastructure (`iringbuf`/`mtrace`/
-`ftrace`), DiffTest against Spike — see the PA2.2 detail log further below for status.
+### 8. Trace infrastructure (`iringbuf`, `mtrace`, `ftrace`) — sanity check
+
+All three are enabled by default in menuconfig (nested under `Testing and
+Debugging`, alongside `ITRACE`) and require no separate setup. Quick way to see
+all three in action at once:
+```bash
+cd ~/Desktop/OSOC/ysyx-workbench/nemu
+./build/riscv32-nemu-interpreter -b -e ../am-kernels/tests/cpu-tests/build/recursion-riscv32-nemu.elf \
+  ../am-kernels/tests/cpu-tests/build/recursion-riscv32-nemu.bin > /tmp/trace.txt
+grep -E "call \[|ret " /tmp/trace.txt | head -20
+```
+**Expect:** an indented call tree with real function names (`main`, `f0`, `f1`,
+`f2`, `f3`) — that's `ftrace`, reading the `.elf`'s symbol table via `-e`.
+`iringbuf` shows itself automatically any time an `invalid opcode` crash happens
+(prints the last 16 instructions leading up to it, most recent marked `-->`).
+`mtrace` writes an `R`/`W` line to stdout for every physical memory access —
+grep `/tmp/trace.txt` for `^R |^W ` to see it directly.
+
+### 9. DiffTest against Spike — one-time setup, then verify
+
+This is a heavier one-time setup (builds a full second RISC-V simulator from
+source, several minutes):
+```bash
+sudo apt-get install device-tree-compiler
+cd ~/Desktop/OSOC/ysyx-workbench/nemu/tools/spike-diff
+make GUEST_ISA=riscv32
+```
+**Expect:** `build/riscv32-spike-so` gets created (~1.8MB). If it instead comes
+out named just `-spike-so` (no `riscv32` prefix), `GUEST_ISA` wasn't picked up —
+rerun with it explicit as above.
+
+Then enable it: `make menuconfig` → Testing and Debugging → turn on
+`[*] Enable differential testing` → confirm `Reference design` is `Spike` → save.
+Rebuild NEMU (`make ISA=riscv32`), then run any test with `-d` pointing at the
+`.so`:
+```bash
+./build/riscv32-nemu-interpreter -b -d tools/spike-diff/build/riscv32-spike-so \
+  -e ../am-kernels/tests/cpu-tests/build/add-riscv32-nemu.elf \
+  ../am-kernels/tests/cpu-tests/build/add-riscv32-nemu.bin
+```
+**Expect:** `HIT GOOD TRAP`, same as without DiffTest, just much slower (every
+instruction gets independently re-executed by Spike and register-compared —
+expected, not a bug). A real mismatch would abort immediately with a `Register
+mismatch` message naming the exact register and both values.
 
 ## Structure
 
@@ -303,7 +349,7 @@ sudo apt-get install g++-riscv64-linux-gnu binutils-riscv64-linux-gnu python-is-
 `am-kernels/tests/cpu-tests/` requires `bash init.sh am-kernels` (see "Related repos"
 below) before any of this can be built or run.
 
-**PA2.2 (in progress) — klib, infrastructure, DiffTest:**
+**PA2.2 (complete) — klib, IOE, malloc, infrastructure, DiffTest:**
 
 `abstract-machine/klib/src/string.c` and `stdio.c` implemented (both were previously
 all-stub, every function calling `panic("Not implemented")`):
@@ -376,10 +422,53 @@ it, `insert-arg` fails with `python: not found` and **silently leaves the old
 `mainargs` value baked into the binary**, which looks exactly like "my code change
 did nothing" and is easy to misdiagnose as a logic bug instead of a missing build step.
 
-**Still to do for PA2.2:** `malloc`/`free`, trace infrastructure (`iringbuf`,
-`mtrace`, `ftrace` — `itrace` already exists in the framework code), DiffTest wiring
-against Spike for instruction-level correctness verification beyond what `cpu-tests`
-happens to exercise.
+**`malloc`/`free`, in `abstract-machine/klib/src/stdlib.c`:**
+
+`malloc()` was a stub (`panic("Not implemented")`); `free()` was already correctly
+a no-op. Implemented as a simple bump allocator per the handout's own suggestion: a
+static pointer starts at `heap.start`, each call hands out the current position and
+advances it by `size` (rounded up to a multiple of 8 for alignment) — no reuse of
+freed memory, which is exactly why `free()` staying empty is correct, not lazy.
+Verified with `am-kernels/kernels/demo` (`mainargs=3`, Tower of Hanoi): renders and
+animates correctly.
+
+**Trace infrastructure, all in `nemu/` (not `abstract-machine/` — these live on the
+hardware/simulator side, not the AM/software side):**
+
+- `iringbuf` (`src/cpu/cpu-exec.c`, `src/engine/interpreter/hostcall.c`) — a fixed-size
+  circular buffer storing the last `CONFIG_IRINGBUF_SIZE` (default 16) instructions'
+  already-formatted `itrace` strings. `display_iringbuf()` prints them oldest-first,
+  most recent marked `-->`, automatically called from `invalid_inst()` right before
+  it reports an `ABORT` — so every invalid-opcode crash now shows the recent
+  instruction trail leading up to it, not just the single crashing instruction.
+- `mtrace` (`src/memory/paddr.c`) — logs every physical memory access (`R`/`W`,
+  address, length, data) via the same `log_write()` `itrace` already uses. Note it
+  also captures instruction *fetches*, not just data loads/stores, since
+  `inst_fetch()` itself goes through `paddr_read()`.
+- `ftrace` (new file `src/monitor/ftrace.c`, wired into `src/monitor/monitor.c` via a
+  new `-e/--elf` flag and into `src/cpu/cpu-exec.c`'s `exec_once()`) — parses an
+  ELF's `.symtab`/`.strtab` to map addresses to real function names, then detects
+  `jal`(call, if `rd != 0`)/`jalr`(return, if exactly `rd==0 && rs1==1` — the D2
+  lecture's `ret` pseudo-instruction encoding) during execution to print an indented
+  call tree. Verified against the `recursion` test (matching the PA2 handout's own
+  worked example): correctly reproduces the "mismatched call/return" phenomenon
+  caused by tail-call optimization that the handout specifically asks about.
+
+**DiffTest against Spike (`nemu/src/isa/riscv32/difftest/dut.c`):**
+
+`isa_difftest_checkregs()` was a stub (`return false`). Implemented: compares
+NEMU's live `cpu.gpr[32]`/`cpu.pc` against Spike's reported post-instruction state,
+printing a clear mismatch message (register name via `reg_name()`, both values) for
+any disagreement. Required real one-time infrastructure setup, not just code:
+installed `device-tree-compiler`, built Spike itself from source via
+`nemu/tools/spike-diff` (had to pass `GUEST_ISA=riscv32` explicitly — it wasn't
+being picked up automatically, and the resulting `.so` built with an empty ISA
+prefix in its filename until fixed), enabled `DIFFTEST`/`DIFFTEST_REF_SPIKE` in
+menuconfig. Verified against `add`: all 845 instructions independently
+re-executed and register-compared against Spike, zero mismatches.
+
+**PA2.2 is now fully complete** — klib, TRM, full IOE (timer/keyboard/VGA/audio),
+`malloc`/`free`, all three trace tools, and DiffTest all implemented and verified.
 
 **Real bugs found and fixed along the way** (worth remembering):
 - `init_regex()` was never called in the standalone test harness → segfault inside
@@ -514,3 +603,15 @@ anywhere and always come straight from upstream.
   interactive `(nemu)` prompt and will hang if run non-interactively. Run
   `./build/riscv32-nemu-interpreter -b <image>.bin` directly instead, or fix the
   Makefile to default to batch mode (a PA2 "required question" I haven't done yet).
+- New Kconfig `*_COND` string options (like `ITRACE_COND`, `MTRACE_COND`) don't
+  become usable C expressions just by adding them to `Kconfig` — they need a
+  matching `-D<NAME>_COND=...` line added to `nemu/Makefile`'s `CFLAGS_TRACE`
+  block, which strips the quotes and pastes the raw Kconfig string as a compiler
+  flag. Easy to add the Kconfig entry, rebuild, and get a confusing "undeclared
+  identifier" error while forgetting this second step exists.
+- `nemu/tools/spike-diff`'s `make` needs `GUEST_ISA=riscv32` passed explicitly —
+  it isn't picked up from NEMU's own `.config` automatically the way other
+  Makefiles in this project do. Symptom if forgotten: it still builds
+  successfully, just names the output file `-spike-so` (empty ISA prefix)
+  instead of `riscv32-spike-so`, which then silently fails to match what
+  `-d tools/spike-diff/build/riscv32-spike-so` expects.
