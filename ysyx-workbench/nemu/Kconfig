@@ -171,6 +171,11 @@ config MTRACE_COND
   string "Only trace memory accesses when the condition is true (address range, e.g. addr >= 0x80000000)"
   default "true"
 
+config FTRACE
+  depends on TRACE
+  bool "Enable function call tracer"
+  default y
+
 config DIFFTEST
   depends on TARGET_NATIVE_ELF
   bool "Enable differential testing"

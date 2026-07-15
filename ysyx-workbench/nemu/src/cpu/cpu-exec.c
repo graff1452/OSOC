@@ -88,6 +88,22 @@ static void exec_once(Decode *s, vaddr_t pc) {
   s->snpc = pc;
   isa_exec_once(s);
   cpu.pc = s->dnpc;
+#ifdef CONFIG_FTRACE
+  {
+    void ftrace_call(paddr_t pc, paddr_t target);
+    void ftrace_ret(paddr_t pc);
+    uint32_t inst = s->isa.inst;
+    uint32_t opcode = inst & 0x7f;
+    uint32_t rd = (inst >> 7) & 0x1f;
+    uint32_t rs1 = (inst >> 15) & 0x1f;
+    if (opcode == 0x6f) { // jal
+      if (rd != 0) ftrace_call(s->pc, s->dnpc);
+    } else if (opcode == 0x67) { // jalr
+      if (rd == 0 && rs1 == 1) ftrace_ret(s->pc);
+      else if (rd != 0) ftrace_call(s->pc, s->dnpc);
+    }
+  }
+#endif
 #ifdef CONFIG_ITRACE
   char *p = s->logbuf;
   p += snprintf(p, sizeof(s->logbuf), FMT_WORD ":", s->pc);
