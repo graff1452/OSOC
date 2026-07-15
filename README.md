@@ -340,6 +340,12 @@ by `cpu-tests` failures (implement only what the next `invalid opcode` error dem
   `INT_MIN`/`-1` overflow special cases (result conventions differ between
   `div`/`divu` and `rem`/`remu` — see comments in `inst.c`)
 
+> **Correction (found during PA2.3):** despite the list above, `slti`, `lb`, and `ori`
+> were *not* actually present in `inst.c` at the end of PA2.1 — all three passed
+> unnoticed because `cpu-tests`' 35/35 never happened to exercise them. Real-world
+> programs (`demo/galton`, `demo/donut`, FCEUX) did, and crashed until fixed. See the
+> PA2.3 section below for the full story of how each was found and fixed.
+
 **Toolchain setup, in addition to the PA1 steps below:**
 ```bash
 sudo apt-get install g++-riscv64-linux-gnu binutils-riscv64-linux-gnu python-is-python3
@@ -486,6 +492,69 @@ and (Ubuntu-specific) a one-line comment-out of `gnu/stubs-ilp32.h`'s include in
 header. Configure via `make menuconfig` (Base ISA → riscv32, leave "Application on
 Abstract-Machine" **unselected** — that option is for a different build mode and will
 break the normal build), then `make`.
+
+**PA2.3 (complete) — demo programs, FCEUX, required questions:**
+
+With malloc/IOE done, ran the full `am-kernels/kernels/demo/` set
+(`ant`/`galton`/`hanoi`/`life`/`cmatrix`/`donut`/`bf`, dispatched via a single digit
+passed as `mainargs` into `src/main.c`'s `switch`) and both character-mode and
+graphical-mode FCEUX (`fceux-am/`, running `mario.nes`). This surfaced **three real
+decoder gaps in NEMU itself** that `cpu-tests` never exercised — all found the same
+way: a program hangs/crashes, `iringbuf`'s auto-dump on `invalid opcode` shows the
+last 16 instructions, `objdump`/`addr2line` on the `.elf` identifies the exact
+instruction, compare against what's already implemented in `inst.c`.
+
+- **`slti` (set-less-than-immediate, signed) was never implemented at all** — only its
+  unsigned sibling `sltiu` existed. Every `slti` in `cpu-tests` apparently used a small
+  enough immediate that signed vs. unsigned comparison gave the same answer, hiding the
+  gap. Surfaced by `galton`'s animation-delay counter (`slti a5,s5,1024` — `1024`'s top
+  bits don't match `sltiu`'s any-small-positive-immediate coverage). Fixed by adding the
+  `funct3=010` pattern, comparison cast to `(sword_t)` (mirrors `slt`'s R-type version,
+  which *was* already correct).
+- **`lb` (load byte, sign-extended) was never implemented** — `lbu`/`lh`/`lhu` all
+  existed, but not plain signed-byte load. Surfaced by `donut`'s shading/lookup code
+  reading a signed byte. Fixed by adding the `funct3=000` pattern with an 8-bit `SEXT`,
+  mirroring `lh`'s 16-bit version.
+- **`ori` (OR-immediate) was never implemented** — `andi`/`xori` (the other two
+  bitwise-immediate ops) existed, `ori` didn't. Surfaced by FCEUX's mapper/board
+  dispatch-table lookup code. Fixed by adding the `funct3=110` pattern (no sign cast
+  needed — OR doesn't care about signedness).
+
+All three follow the same pattern: not *wrong* code, just *absent* code that 35/35
+`cpu-tests` passing never required — a good reminder that a passing test suite is a
+claim about what it tested, not a claim of completeness. Also hit and fixed a false
+alarm along the way: `make ARCH=riscv32-nemu run` in `demo/` crashed with
+`Assertion 'ref_so_file != NULL' failed` — not a new bug, just DiffTest still being
+enabled in `.config` from PA2.2 testing, expecting a `-d <spike.so>` flag that wasn't
+being passed for a plain demo run. Fixed by disabling DiffTest in `make menuconfig`.
+
+**FCEUX-specific notes:**
+- Character mode: comment out `HAS_GUI` in `fceux-am/src/config.h`, rebuild, run — no
+  VGA dependency, output goes through `putch()`. FCEUX's own startup log
+  (`ROM MD5:  0x2x2x2x2x2x2x2x2x2x2x...`) reveals klib's `vsprintf` doesn't support
+  `%x`/width modifiers (scoped to `%s`/`%d` only per the PA2.2 handout) — expected
+  limitation surfacing in third-party code, not a new bug to fix.
+- Graphical mode: re-enable `HAS_GUI`, rebuild — reuses the VGA code from PA2.2
+  unchanged. Confirmed working: full-color "SUPER MARIO BROS." title screen renders
+  correctly. No keyboard support wired into FCEUX at this stage (per handout), so the
+  attract-mode demo is display-only, not playable yet.
+- `fceux-am`'s build output lands directly in `build/`, not `nes/build/` as its own
+  README's `native` instructions might suggest at a glance — worth double-checking the
+  actual path after a build (`+ LD -> build/fceux-riscv32-nemu.elf` in the build log)
+  rather than assuming.
+- Some of `demo/`'s programs (`donut` specifically) have their own internal `while(1)`
+  render loop that never returns to `main()` — so `main()`'s "press Q to exit" handler
+  is unreachable for those. Not a bug, just how that file is written; exit via `Ctrl+C`
+  instead, same as the raw `am-tests` binaries.
+
+**Required questions answered in the lab report** (`学号.pdf`): state-machine diagram
+for the YEMU addition program + RTFSC connection to `exec_once()`; RTFSC of one `add`
+instruction's full fetch→decode→execute→PC-update path through `inst.c`; the typing
+game's five-layer (physical→NEMU→ISA→AM→program) IOE round-trip; three compile/link
+experiments on `inst_fetch()`'s `static`/`inline` qualifiers and a `dummy`-variable
+duplication puzzle across `common.h`/`debug.h` (tentative-definition merging is the
+key insight — uninitialized `static` redeclarations merge silently, initialized ones
+don't); and tracing `hello/`'s `Makefile`/build pipeline via `make -n`.
 
 ### Related repos (not included here)
 
