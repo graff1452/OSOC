@@ -7,7 +7,7 @@ Personal coursework repository for the "一生一芯" (ysyx / One Student One Ch
 [Structure](#structure) ·
 [F6 (Logisim)](#f--f6-mini-risc-v-processor-logisim) ·
 [E-phase sims](#e--e-phase-instruction-set-simulators) ·
-[NPC (RTL)](#npc--rtl-reimplementation-d4-complete) ·
+[NPC (RTL)](#npc--rtl-reimplementation-d4-complete-d5-in-progress) ·
 [NEMU / PA1 & PA2 detail log](#nemu--e6pa1--pa2-njus-ics-simple-debugger--rv32im-computer-system) ·
 [Related repos](#related-repos-not-included-here) ·
 [Setting up a new machine](#setting-up-a-new-machine) ·
@@ -288,14 +288,24 @@ gcc -Wall -Wextra minirvemu.c -o minirvemu
 Cloned from [OSCPU/ysyx-workbench](https://github.com/OSCPU/ysyx-workbench). This is the
 scaffold the course builds up incrementally via `init.sh`.
 
-### `npc/` — RTL Reimplementation (D4, complete)
+### `npc/` — RTL Reimplementation (D4 complete, D5 in progress)
 
 Reimplementation of the `minirv` processor from `f/` in real Verilog/RTL, verified with
 Verilator. D4 is done: a complete 8-instruction `minirv` core (`addi`, `add`, `lui`,
 `jalr`, `lw`, `lbu`, `sw`, `sb`, plus `ebreak`), DPI-C-based memory access and
 simulation control, and full AM toolchain integration (`minirv-npc` target) — verified
-by running real compiled C programs, 35/35 passing on `cpu-tests`. See
-[`npc/README.md`](ysyx-workbench/npc/README.md) for the full breakdown of what's in
+by running real compiled C programs, 35/35 passing on `cpu-tests`.
+
+D5 (devices and I/O) is in progress: UART output and a real-time clock are implemented
+purely by adding address checks to the existing DPI-C `pmem_read`/`pmem_write`
+functions — **no RTL changes at all** — plus the matching AM-side platform code
+(`putch()`, `__am_timer_uptime()`). Verified with the `hello` kernel (real text output)
+and `am-tests`' real-time clock test (ticks once per real second), and further stress-
+tested by booting character-mode FCEUX (`fceux-am`, `mario.nes`) to a full, recognizable
+ASCII title screen running on the actual RTL core. VGA (graphical Mario) is the
+remaining optional piece, not yet started.
+
+See [`npc/README.md`](ysyx-workbench/npc/README.md) for the full breakdown of what's in
 each subfolder (`xor-test/`, `nvboard-xor/`, `nvboard-light/`, `scpu-rtl/`, `dpi-test/`,
 `minirv-rtl/`) and how to run them.
 
@@ -762,6 +772,27 @@ course's own upstream source, nothing personal to track down.
   block, which strips the quotes and pastes the raw Kconfig string as a compiler
   flag. Easy to add the Kconfig entry, rebuild, and get a confusing "undeclared
   identifier" error while forgetting this second step exists.
+- The `minirv-npc` `ARCH` target never defined the `ISA_H` macro (compare
+  `scripts/minirv-nemu.mk`, which has `CFLAGS += -DISA_H=\"riscv/riscv.h\"` —
+  `scripts/minirv-npc.mk` was missing the equivalent line entirely). This went
+  unnoticed through all of D4 because nothing in `trm.c`/`timer.c` needed
+  `outb`/`inl` (from `riscv/riscv.h`) until D5's UART/clock work actually called
+  them — surfaced as `implicit declaration of function 'outb'`. Fixed by adding
+  the same `-DISA_H=\"riscv/riscv.h\"` line to `minirv-npc.mk`, **and** adding a
+  new `npc.h` (mirroring `nemu.h`) with `#include ISA_H` in it — the macro being
+  defined isn't enough on its own if nothing actually `#include`s it.
+- Compiled `.o` files don't get deleted when a compile step fails partway through
+  a multi-file build — they're just left stale. Cost real debugging time during D5:
+  fixing `trm.c`'s compile error didn't actually get exercised on the next `make
+  run`, because `trm.o` from *before* the fix was still sitting there looking
+  "up to date" to Make. A full `rm -rf am/build klib/build <program>/build` is the
+  reliable fix when a previous build attempt errored out partway through.
+- Verilator's own build (`verilator -cc --exe --build ...` inside `minirv-rtl/`)
+  and the AM program build (`make ARCH=minirv-npc run` from a kernel/test
+  directory) are two entirely separate build systems that happen to share a
+  directory — `make ARCH=minirv-npc run` never rebuilds `Vminirv` itself, only
+  the `.bin` it hands to whatever `Vminirv` already exists on disk. Editing
+  `minirv-rtl/csrc/main.cpp` always needs its own explicit Verilator rebuild.
 - `nemu/tools/spike-diff`'s `make` needs `GUEST_ISA=riscv32` passed explicitly —
   it isn't picked up from NEMU's own `.config` automatically the way other
   Makefiles in this project do. Symptom if forgotten: it still builds

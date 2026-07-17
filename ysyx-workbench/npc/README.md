@@ -169,6 +169,85 @@ trick, so the large majority of their test files exercise instructions genuinely
 from this RTL by design; `cpu-tests`'s 35/35 was judged sufficient evidence for D4's
 actual scope.
 
+## D5 — Devices and I/O (in progress)
+
+MMIO for NPC needed **zero RTL changes** — `ifu.v` and `lsu.v` already funnel every
+instruction fetch and every load/store through `pmem_read()`/`pmem_write()` in
+`minirv-rtl/csrc/main.cpp`, so "implementing a device" just means teaching those two
+C++ functions to recognize specific addresses and redirect them, instead of treating
+them as real `pmem[]` memory. Addresses deliberately reuse NEMU's own numbers
+(`SERIAL_PORT` = `0xa00003f8`, `RTC_ADDR` = `0xa0000048`) — different backend, same
+constants, defined once in a new `abstract-machine/am/src/riscv/npc/include/npc.h`
+(mirroring `nemu.h`'s pattern).
+
+**UART (`pmem_write`):** a write to `UART_ADDR` is intercepted before the normal
+`PMEM_BASE`-relative address math runs (that math would otherwise silently swallow it —
+`UART_ADDR` is a device address, not real memory, so treating it as a `pmem[]` offset
+would come out nonsensically large and just no-op via the existing bounds check). The
+byte itself comes through `wdata & 0xFF`; goes straight to `putchar()` + `fflush()`.
+AM-side: `trm.c`'s `putch()` now calls `outb(UART_ADDR, ch)` — the exact same `outb()`
+NEMU's `putch()` already used, since it's defined once in `riscv/riscv.h`, shared by
+every RISC-V platform.
+
+**Clock (`pmem_read`):** same interception pattern, but the source of "time" is real —
+`main.cpp` calls `clock_gettime(CLOCK_MONOTONIC, ...)`, records the first read as a
+boot timestamp, and reports elapsed microseconds since then. Since `pmem_read` only
+returns one 32-bit `int` per call, the 64-bit microsecond count is split across two
+addresses — `RTC_ADDR` (low 32 bits), `RTC_ADDR + 4` (high 32 bits) — same two-halves
+approach NEMU's own `RTC_ADDR` register already uses. AM-side: `timer.c`'s
+`__am_timer_uptime()` reads both halves via `inl()` and reassembles them, casting the
+high half to `uint64_t` *before* shifting left 32 (shifting a still-32-bit value left by
+32 is undefined behavior — same subtlety already called out in this repo's NEMU
+`timer.c` notes above). `__am_timer_rtc()` (the actual calendar date, not uptime) stays
+a placeholder — matches NEMU's own known limitation, not a new gap.
+
+**Real bugs found and fixed along the way:**
+- `ISA_H` was never defined for the `minirv-npc` `ARCH` target at all (present in
+  `minirv-nemu.mk`, missing from `minirv-npc.mk`) — invisible through all of D4 since
+  nothing needed `outb`/`inl` until now. Fixed by adding the matching
+  `-DISA_H=\"riscv/riscv.h\"` line, **and** making sure something actually
+  `#include`s it (`npc.h` does, mirroring `nemu.h`) — defining the macro alone
+  doesn't pull in the header on its own.
+- `main.cpp`'s original `MAX_CYCLES = 1000000` was sized for `cpu-tests`-style
+  programs that terminate via `ebreak`. Both the real-time clock test and FCEUX
+  run indefinitely by design (no `ebreak` ever) — the cap was hit and reported as
+  a timeout before a single second of simulated time had even elapsed. Raised to
+  2,000,000,000 (`long long`, not `int`, to avoid overflow) with a heartbeat print
+  every 10M cycles, so genuine progress is visible instead of a silent wait.
+- Two separate build systems share `minirv-rtl/`'s directory without either
+  triggering the other: the Verilator build (`verilator -cc --exe --build ...`)
+  produces `Vminirv`; the AM program build (`make ARCH=minirv-npc run` from a
+  kernel/test directory) only rebuilds the `.bin` and runs whatever `Vminirv`
+  already exists on disk. Editing `main.cpp` silently has no effect until
+  `Vminirv` is rebuilt explicitly — easy to mistake for "my code change did
+  nothing," same shape of bug as the `mainargs` gotcha already documented for
+  NEMU builds.
+
+**Verified:**
+- `am-kernels/kernels/hello` (`make ARCH=minirv-npc run`): prints
+  `Hello, AbstractMachine!` for real, through `outb()` → `sb` → `lsu.v` →
+  `pmem_write()` → `putchar()`.
+- `am-kernels/tests/am-tests` (`make ARCH=minirv-npc mainargs=t run`): prints one
+  line per real elapsed second, confirming `__am_timer_uptime()`'s microsecond count
+  tracks actual wall-clock time, not a fake counter.
+- `fceux-am` character mode (`HAS_GUI` commented out in `src/config.h`,
+  `make ARCH=minirv-npc run`): boots to a full, recognizable ASCII-art Super Mario
+  title screen, rendered entirely through the UART path above — no VGA needed for
+  this part. FCEUX's own internal FPS/timing readout (`(System time: ...s)`) is a
+  second, independent confirmation the clock works, on top of the RTC test.
+  Runs indefinitely by design (continuous redraw loop, never calls `ebreak`) — stop
+  with `Ctrl+C` once the image is visibly stable, same as the `donut` demo from
+  PA2.3.
+
+**Not yet done — VGA (optional per the handout):** a real framebuffer region
+(`FB_ADDR`, one `uint32_t` per pixel across the whole screen) plus a small VGA control
+register (`VGACTL_ADDR`: word 0 = `(width<<16)|height`, word 1 = a sync flag the
+program sets after finishing a frame). Structurally different from UART/clock — this is
+an address *range* to recognize, not a single fixed address — and needs a new `gpu.c`
+under `abstract-machine/am/src/riscv/npc/` (doesn't exist yet) registered into
+`ioe.c`'s dispatch table, plus something on the `main.cpp` side to actually display the
+framebuffer (likely SDL, mirroring NEMU's own `vga.c`).
+
 ## Running things
 
 Each subfolder is self-contained:
