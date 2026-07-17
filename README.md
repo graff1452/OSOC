@@ -802,15 +802,20 @@ course's own upstream source, nothing personal to track down.
   run`, because `trm.o` from *before* the fix was still sitting there looking
   "up to date" to Make. A full `rm -rf am/build klib/build <program>/build` is the
   reliable fix when a previous build attempt errored out partway through.
-  Same failure mode showed up worse on a second machine while building
+  Same failure mode showed up worse on two separate machines while building
   `fceux-am`: `emufile.o` on disk was only 40 bytes and `file` reported it as
-  plain `data`, not a real object — almost certainly left behind by some earlier
-  build attempt that got interrupted or errored out partway through (exact cause
-  unconfirmed), but `make` still treated it as valid and handed it straight to the
-  linker, which failed with `file not recognized: file format not recognized`. Same
-  fix, same lesson: when a build looks wrong and you can't otherwise explain why,
-  don't trust partial state — wipe every relevant `build/` directory and force a
-  full rebuild from scratch rather than debugging around a possibly-corrupt cache:
+  plain `data`, not a real object. Root cause, confirmed by reproducing it: a test
+  script wrapped `make ARCH=minirv-npc run` in a short `timeout`, but that command
+  compiles ~200 C++ files (every FCEUX board driver) *and* runs the simulation as
+  one unit — compiling alone can take several minutes, so the timeout killed `g++`
+  mid-write on whatever file it was compiling at the time, leaving a truncated
+  object behind. The next `make` then trusted that corrupt file as "already built"
+  and handed it straight to the linker, which failed with `file not recognized:
+  file format not recognized`. Fix at the source: never wrap a *build* step in a
+  short timeout — only the *run* step is unbounded by design (FCEUX loops
+  forever), so only that step should ever be time-limited; building must always be
+  allowed to run to completion. When this class of corruption does happen (from
+  this bug or any other interrupted build), the recovery is the same as above:
   ```bash
   rm -rf ~/Desktop/OSOC/ysyx-workbench/abstract-machine/am/build
   rm -rf ~/Desktop/OSOC/ysyx-workbench/abstract-machine/klib/build
@@ -837,6 +842,15 @@ course's own upstream source, nothing personal to track down.
   too, since `./build/riscv32-nemu-interpreter` was never actually built. Fix: set
   `NEMU_HOME` directly — `echo "export NEMU_HOME=$(readlink -f nemu)" >> ~/.bashrc &&
   source ~/.bashrc` — don't rely on `init.sh nemu` to do it on this repo.
+- Building `nemu/` prints `flock: cannot open lock file .../nemu/../.git/: No such
+  file or directory` and `sync: error opening '.../nemu/../.git/'...`, both marked
+  `(ignored)` by Make itself, right after `+ LD .../riscv32-nemu-interpreter`. This is
+  expected, not a real error — same "originality tracking" `git_commit` mechanism
+  already noted for the top-level `npc/` `Makefile`'s `sim` target below, just showing
+  up here because `nemu/`'s own `.git` was stripped when it got committed directly
+  into this repo (same reason `bash init.sh nemu` no-ops, see the `NEMU_HOME` note
+  above). The recipe is deliberately written to allow this specific step to fail
+  without blocking the real build — confirmed by Make's own `(ignored)` annotation.
 - `nemu/tools/spike-diff`'s `make` needs `GUEST_ISA=riscv32` passed explicitly —
   it isn't picked up from NEMU's own `.config` automatically the way other
   Makefiles in this project do. Symptom if forgotten: it still builds
