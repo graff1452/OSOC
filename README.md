@@ -7,7 +7,7 @@ Personal coursework repository for the "一生一芯" (ysyx / One Student One Ch
 [Structure](#structure) ·
 [F6 (Logisim)](#f--f6-mini-risc-v-processor-logisim) ·
 [E-phase sims](#e--e-phase-instruction-set-simulators) ·
-[NPC (RTL)](#npc--rtl-reimplementation-d4e5-in-progress) ·
+[NPC (RTL)](#npc--rtl-reimplementation-d4-complete) ·
 [NEMU / PA1 & PA2 detail log](#nemu--e6pa1--pa2-njus-ics-simple-debugger--rv32im-computer-system) ·
 [Related repos](#related-repos-not-included-here) ·
 [Full setup from scratch](#full-setup-on-a-brand-new-device) ·
@@ -288,12 +288,16 @@ gcc -Wall -Wextra minirvemu.c -o minirvemu
 Cloned from [OSCPU/ysyx-workbench](https://github.com/OSCPU/ysyx-workbench). This is the
 scaffold the course builds up incrementally via `init.sh`.
 
-### `npc/` — RTL Reimplementation (D4/E5, in progress)
+### `npc/` — RTL Reimplementation (D4, complete)
 
-Skeleton for reimplementing the `minirv` processor from `f/` in real Verilog/RTL,
-verified with Verilator and (for interactive testing) NVBoard. See
+Reimplementation of the `minirv` processor from `f/` in real Verilog/RTL, verified with
+Verilator. D4 is done: a complete 8-instruction `minirv` core (`addi`, `add`, `lui`,
+`jalr`, `lw`, `lbu`, `sw`, `sb`, plus `ebreak`), DPI-C-based memory access and
+simulation control, and full AM toolchain integration (`minirv-npc` target) — verified
+by running real compiled C programs, 35/35 passing on `cpu-tests`. See
 [`npc/README.md`](ysyx-workbench/npc/README.md) for the full breakdown of what's in
-each subfolder (`xor-test/`, `nvboard-xor/`, `nvboard-light/`) and how to run them.
+each subfolder (`xor-test/`, `nvboard-xor/`, `nvboard-light/`, `scpu-rtl/`, `dpi-test/`,
+`minirv-rtl/`) and how to run them.
 
 ### `nemu/` — E6/PA1 & PA2: NJU's ICS Simple Debugger + RV32IM Computer System
 
