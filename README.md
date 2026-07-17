@@ -10,7 +10,7 @@ Personal coursework repository for the "一生一芯" (ysyx / One Student One Ch
 [NPC (RTL)](#npc--rtl-reimplementation-d4-complete) ·
 [NEMU / PA1 & PA2 detail log](#nemu--e6pa1--pa2-njus-ics-simple-debugger--rv32im-computer-system) ·
 [Related repos](#related-repos-not-included-here) ·
-[Full setup from scratch](#full-setup-on-a-brand-new-device) ·
+[Setting up a new machine](#setting-up-a-new-machine) ·
 [Notes for future me](#notes-for-future-me)
 
 ## What is this project, in plain terms?
@@ -66,8 +66,8 @@ course, described in their own sections below.
 ## Build NEMU (one-time)
 
 Assumes Ubuntu, a fresh clone of this repo, SSH key already set up on GitHub — see
-["Full setup on a brand-new device"](#full-setup-on-a-brand-new-device) below if any
-of that isn't true yet.
+["Setting up a new machine"](#setting-up-a-new-machine) below if any of that isn't
+true yet.
 
 ```bash
 cd ~/Desktop/OSOC/ysyx-workbench
@@ -562,9 +562,10 @@ don't); and tracing `hello/`'s `Makefile`/build pipeline via `make -n`.
 
 ### Related repos (not included here)
 
-`init.sh` clones some subprojects as **independent git repositories**, gitignored by
-`ysyx-workbench` itself. These live in my own separate repos, cloned inside
-`ysyx-workbench/`, alongside `abstract-machine/` and `npc/`:
+Not everything lives inside this repo. A few pieces grew big enough that I split them
+into their own separate GitHub repos, and just cloned those repos into folders here
+(alongside `abstract-machine/` and `npc/`, which — unlike these four — live directly
+inside this repo's own git history, no separate cloning needed):
 
 - **[am-kernels](https://github.com/graff1452/am-kernels)** — AM test programs + my own
   screensaver and GUI-enabled `minirvEMU`. Also contains `tests/cpu-tests/`, the RV32IM
@@ -576,33 +577,99 @@ don't); and tracing `hello/`'s `Makefile`/build pipeline via `make -n`.
   timing/power analysis (iEDA) pipeline, used to turn `npc/` RTL into a real
   standard-cell netlist and get a first PPA (performance/power/area) estimate
 
-### Full setup on a brand-new device
+Why this matters for setup: cloning *this* repo alone is not enough to get a fully
+working checkout — these four also need cloning separately. The next section covers
+exactly when and how.
+
+### Setting up a new machine
+
+There are two very different reasons someone might be reading this section — pick
+whichever one is actually you, since the right steps are genuinely different.
+
+- **"I'm new to this course and want to try it myself"** → go to
+  [Starting the course fresh](#starting-the-course-fresh), below.
+- **"This is my repo, and I just want my existing work running on another computer"**
+  → go to [Picking up my own work on a new device](#picking-up-my-own-work-on-a-new-device),
+  below.
+
+#### Starting the course fresh
+
+If you found this repo while looking into the "一生一芯" (ysyx) course yourself: **don't
+clone the four repos listed just above.** Those contain my own finished/in-progress
+answers to the course's exercises — copying them would mean copying solutions instead
+of doing the work, which is the opposite of what the course (and this whole repo) is
+for. Use this repo as a *reference* for how one person organized things, not as a
+starting point to clone from.
+
+Instead, get the same **blank, starter** version of the framework that I started from:
 
 ```bash
-# 1. Generate an SSH key on this machine and add its public key to GitHub
-#    (Settings -> SSH and GPG keys -> New SSH key)
+git clone https://github.com/OSCPU/ysyx-workbench.git
+cd ysyx-workbench
+
+# each of these downloads a fresh, unmodified copy of that piece —
+# not my solved version of it
+bash init.sh nemu
+bash init.sh am-kernels
+bash init.sh abstract-machine
+bash init.sh npc
+bash init.sh nvboard
+```
+
+From there, follow the course's own handouts for each phase (F, E, D, ...) and write
+the code yourself. The toolchain-installation commands lower down in this section
+(Verilator, the RISC-V cross-compiler, SDL2, etc.) still apply to you exactly as
+written — those are just "software this course needs," not part of my personal setup.
+
+#### Picking up my own work on a new device
+
+This is the case where you (meaning: me, on a different computer) already did all the
+work, and it's already saved on GitHub. Nothing here needs to be redone or figured out
+again — every step below is just "download what already exists" or "install the same
+background tool I already installed once before." Follow these in order:
+
+**1. Let this new machine talk to GitHub.** Generate an SSH key here and add its public
+half to your GitHub account (Settings → SSH and GPG keys → New SSH key):
+```bash
 ssh-keygen -t ed25519 -C "your_email@example.com"
 cat ~/.ssh/id_ed25519.pub
+```
 
-# 2. Clone this repo
+**2. Download the main repo** (this one):
+```bash
 cd ~/Desktop
 git clone git@github.com:graff1452/OSOC.git
+```
 
-# 3. Clone the subprojects into ysyx-workbench/
+**3. Download the three other repos that live alongside it.** As explained above,
+`am-kernels`, `fceux-am`, and `nvboard` are separate GitHub repos, not part of
+`OSOC` itself — cloning `OSOC` alone won't bring them along:
+```bash
 cd OSOC/ysyx-workbench
 git clone git@github.com:graff1452/am-kernels.git
 git clone git@github.com:graff1452/fceux-am.git
 git clone git@github.com:graff1452/nvboard.git
+```
+
+**4. Install NVBoard's dependencies, and tell the shell where to find it:**
+```bash
 sudo apt-get install libsdl2-dev libsdl2-image-dev libsdl2-ttf-dev
 echo "export NVBOARD_HOME=$(readlink -f nvboard)" >> ~/.bashrc
+```
 
-# 4. Point AM_HOME at the abstract-machine that came with this repo
-#    (already present -- no need to re-run init.sh for it)
+**5. Point at `abstract-machine/` — no separate download needed here.** Unlike the
+three repos above, `abstract-machine/` is tracked directly inside `OSOC` itself, so
+step 2 already brought it along:
+```bash
 echo "export AM_HOME=$(readlink -f abstract-machine)" >> ~/.bashrc
 source ~/.bashrc
+```
 
-# 5. Install Verilator v5.008 from source, OUTSIDE this repo
-#    (see https://verilator.org/guide/latest/install.html)
+**6. Install Verilator v5.008 from source.** The version Ubuntu's package manager
+offers is too old for what `npc/` needs, so this has to be built by hand, outside the
+repo (see [the official install guide](https://verilator.org/guide/latest/install.html)
+for more detail than fits here):
+```bash
 sudo apt-get install git make autoconf g++ flex bison help2man
 #    (help2man is needed by `sudo make install` -- without it, install fails
 #    partway through with "help2man: No such file or directory")
@@ -611,13 +678,18 @@ git clone https://github.com/verilator/verilator
 cd verilator && git checkout v5.008
 autoconf && ./configure && make -j$(nproc) && sudo make install
 verilator --version   # should report "Verilator 5.008"
+```
 
-# 6. Point NPC_HOME at npc/
+**7. Point at `npc/`:**
+```bash
 cd ~/Desktop/OSOC/ysyx-workbench
 bash init.sh npc
 source ~/.bashrc
+```
 
-# 7. Clone yosys-sta (synthesis + timing/power analysis) and install its toolchain
+**8. Set up `yosys-sta`** (synthesis + timing/power analysis) — only needed if you
+plan to redo the PPA/synthesis work, not for RTL simulation itself:
+```bash
 cd ~/Desktop
 git clone git@github.com:graff1452/yosys-sta.git
 # download oss-cad-suite for your architecture (`uname -m`) from
@@ -630,8 +702,11 @@ cd yosys-sta
 sudo apt-get install libunwind-dev liblzma-dev
 make init
 echo exit | ./bin/iEDA -v
+```
 
-# 8. Set up NEMU (E6/PA1) and PA2 (RV32IM decoder, klib, IOE, malloc)
+**9. Build NEMU from source.** Only the *source code* is saved in git — the compiled
+program itself isn't, so it has to be rebuilt on every new machine:
+```bash
 cd ~/Desktop/OSOC/ysyx-workbench
 bash init.sh nemu
 source ~/.bashrc
@@ -647,20 +722,25 @@ make menuconfig   # Base ISA -> riscv32 (default); turn ON Devices; leave
                   # "Application on Abstract-Machine" UNSELECTED, or the build breaks
 make
 ./build/riscv32-nemu-interpreter
-
-# 9. Pull in the test/demo sources, then see "Testing guide -- verify everything"
-#    near the top of this file for the full set of commands (cpu-tests, timer,
-#    keyboard, VGA, audio, malloc/hanoi demo) and what each one should show you.
-bash init.sh am-kernels   # if not already cloned in step 3
-
-# 10. (Optional) place a legally-obtained ROM to run fceux-am --
-#     nes/rom/ is gitignored, so this has to be done manually every time
-#     fceux-am/nes/rom/<name>.nes
 ```
 
-For any *other* `init.sh` subprojects not yet needed (`npc-chisel`, ...), just
-run `bash init.sh <name>` from `ysyx-workbench/` as usual -- those aren't tracked
-anywhere and always come straight from upstream.
+**10. Pull in the test/demo sources** (skip if step 3 already cloned `am-kernels`),
+then see ["Testing guide — verify everything"](#testing-guide--verify-everything)
+near the top of this file for the full list of checks (cpu-tests, timer, keyboard,
+VGA, audio, malloc/hanoi demo) and what a correct result looks like for each:
+```bash
+bash init.sh am-kernels
+```
+
+**11. (Optional) Add a ROM to run `fceux-am`.** `nes/rom/` is gitignored on purpose
+(ROM files shouldn't be committed), so this has to be done by hand on every machine —
+place a legally-obtained ROM at `fceux-am/nes/rom/<name>.nes`.
+
+---
+
+For any *other* `init.sh` subproject not covered above (`npc-chisel`, ...), just run
+`bash init.sh <name>` from `ysyx-workbench/` — those always come straight from the
+course's own upstream source, nothing personal to track down.
 
 ## Notes for future me
 
