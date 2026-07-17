@@ -72,6 +72,13 @@ true yet.
 ```bash
 cd ~/Desktop/OSOC/ysyx-workbench
 
+# NEMU_HOME: nemu/ ships pre-populated inside this repo (committed directly, .git
+# stripped), so `bash init.sh nemu` will just print "already initialized, skipping"
+# and silently do nothing -- including never setting NEMU_HOME. Set it directly:
+echo "export NEMU_HOME=$(readlink -f nemu)" >> ~/.bashrc
+source ~/.bashrc
+echo $NEMU_HOME   # sanity check -- should print the nemu path, not blank
+
 # one-time OS packages -- covers everything below (cpu-tests, IOE devices, malloc/demo)
 sudo apt-get install bison flex libreadline-dev python-is-python3 \
   g++-riscv64-linux-gnu binutils-riscv64-linux-gnu \
@@ -500,8 +507,11 @@ re-executed and register-compared against Spike, zero mismatches.
   evaluate as signed `int` until the final assignment — caused wrong answers on any
   expression involving negative intermediate division results
 
-**Setup:** needs `bash init.sh nemu` (sets `$NEMU_HOME`), `bison flex libreadline-dev`,
-and (Ubuntu-specific) a one-line comment-out of `gnu/stubs-ilp32.h`'s include in
+**Setup:** needs `NEMU_HOME` set (`echo "export NEMU_HOME=$(readlink -f nemu)" >>
+~/.bashrc && source ~/.bashrc` — **not** `bash init.sh nemu`, which no-ops on a fresh
+clone of this repo since `nemu/` already ships populated; see the "Build NEMU" note at
+the top of this README), `bison flex libreadline-dev`, and (Ubuntu-specific) a one-line
+comment-out of `gnu/stubs-ilp32.h`'s include in
 `/usr/riscv64-linux-gnu/include/gnu/stubs.h` to work around a missing 32-bit multilib
 header. Configure via `make menuconfig` (Base ISA → riscv32, leave "Application on
 Abstract-Machine" **unselected** — that option is for a different build mode and will
@@ -715,11 +725,16 @@ echo exit | ./bin/iEDA -v
 ```
 
 **9. Build NEMU from source.** Only the *source code* is saved in git — the compiled
-program itself isn't, so it has to be rebuilt on every new machine:
+program itself isn't, so it has to be rebuilt on every new machine. `nemu/` ships
+pre-populated inside this repo (committed directly, `.git` stripped) — `bash init.sh
+nemu` will just print `"nemu is already initialized, skipping..."` and silently do
+nothing, **including never setting `NEMU_HOME`**, since that only happens the very
+first time `init.sh` actually clones something. Set it directly instead:
 ```bash
 cd ~/Desktop/OSOC/ysyx-workbench
-bash init.sh nemu
+echo "export NEMU_HOME=$(readlink -f nemu)" >> ~/.bashrc
 source ~/.bashrc
+echo $NEMU_HOME   # sanity check -- should print the nemu path, not blank
 sudo apt-get install bison flex libreadline-dev
 sudo apt-get install g++-riscv64-linux-gnu binutils-riscv64-linux-gnu python-is-python3
 sudo apt-get install libsdl2-dev libsdl2-image-dev libsdl2-ttf-dev
@@ -793,6 +808,18 @@ course's own upstream source, nothing personal to track down.
   directory — `make ARCH=minirv-npc run` never rebuilds `Vminirv` itself, only
   the `.bin` it hands to whatever `Vminirv` already exists on disk. Editing
   `minirv-rtl/csrc/main.cpp` always needs its own explicit Verilator rebuild.
+- `bash init.sh nemu` looks like it sets `NEMU_HOME`, but only does so the *first*
+  time it actually clones something — `init()`'s very first check is `if [ -d nemu ];
+  then echo "already initialized, skipping"; return; fi`, which exits before ever
+  reaching the `addenv` call that writes `NEMU_HOME` to `~/.bashrc`. Since `nemu/`
+  ships committed directly inside *this* repo (`.git` stripped, tracked as regular
+  files), a fresh `git clone` of `OSOC` already has `nemu/` populated — so on any new
+  machine, `bash init.sh nemu` immediately hits that early return and silently does
+  nothing at all, `NEMU_HOME` included. Symptom: `make` inside `nemu/` fails instantly
+  with `NEMU_HOME= is not a NEMU repo`, and every single `cpu-tests` test then fails
+  too, since `./build/riscv32-nemu-interpreter` was never actually built. Fix: set
+  `NEMU_HOME` directly — `echo "export NEMU_HOME=$(readlink -f nemu)" >> ~/.bashrc &&
+  source ~/.bashrc` — don't rely on `init.sh nemu` to do it on this repo.
 - `nemu/tools/spike-diff`'s `make` needs `GUEST_ISA=riscv32` passed explicitly —
   it isn't picked up from NEMU's own `.config` automatically the way other
   Makefiles in this project do. Symptom if forgotten: it still builds
