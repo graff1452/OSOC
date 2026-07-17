@@ -810,7 +810,15 @@ course's own upstream source, nothing personal to track down.
   linker, which failed with `file not recognized: file format not recognized`. Same
   fix, same lesson: when a build looks wrong and you can't otherwise explain why,
   don't trust partial state — wipe every relevant `build/` directory and force a
-  full rebuild from scratch rather than debugging around a possibly-corrupt cache.
+  full rebuild from scratch rather than debugging around a possibly-corrupt cache:
+  ```bash
+  rm -rf ~/Desktop/OSOC/ysyx-workbench/abstract-machine/am/build
+  rm -rf ~/Desktop/OSOC/ysyx-workbench/abstract-machine/klib/build
+  rm -rf ~/Desktop/OSOC/ysyx-workbench/fceux-am/build   # or whichever program's build/
+  cd ~/Desktop/OSOC/ysyx-workbench/fceux-am
+  make ARCH=minirv-npc run 2>&1 | tee /tmp/build.log   # tee: so a repeat failure is
+                                                        # scrollable, not just a tail
+  ```
 - Verilator's own build (`verilator -cc --exe --build ...` inside `minirv-rtl/`)
   and the AM program build (`make ARCH=minirv-npc run` from a kernel/test
   directory) are two entirely separate build systems that happen to share a
