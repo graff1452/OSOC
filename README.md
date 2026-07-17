@@ -802,6 +802,15 @@ course's own upstream source, nothing personal to track down.
   run`, because `trm.o` from *before* the fix was still sitting there looking
   "up to date" to Make. A full `rm -rf am/build klib/build <program>/build` is the
   reliable fix when a previous build attempt errored out partway through.
+  Same failure mode showed up worse on a second machine while building
+  `fceux-am`: `emufile.o` on disk was only 40 bytes and `file` reported it as
+  plain `data`, not a real object — almost certainly left behind by some earlier
+  build attempt that got interrupted or errored out partway through (exact cause
+  unconfirmed), but `make` still treated it as valid and handed it straight to the
+  linker, which failed with `file not recognized: file format not recognized`. Same
+  fix, same lesson: when a build looks wrong and you can't otherwise explain why,
+  don't trust partial state — wipe every relevant `build/` directory and force a
+  full rebuild from scratch rather than debugging around a possibly-corrupt cache.
 - Verilator's own build (`verilator -cc --exe --build ...` inside `minirv-rtl/`)
   and the AM program build (`make ARCH=minirv-npc run` from a kernel/test
   directory) are two entirely separate build systems that happen to share a
