@@ -15,6 +15,7 @@
 // main.cpp -- there is no compiler check that will catch a mismatch.
 #define UART_ADDR   0xa00003f8
 #define RTC_ADDR    0xa0000048
+#define KBD_ADDR    0xa0000060
 #define VGACTL_ADDR 0xa0000100   // word0 (read): (width<<16)|height. word0+4 (write): sync trigger
 #define FB_ADDR     0xa1000000
 #define SCREEN_W    400

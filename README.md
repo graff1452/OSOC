@@ -312,7 +312,10 @@ plus the matching AM-side platform code (`trm.c`'s `putch()`, `timer.c`'s
 real second) and video test (correct animated pattern in a real SDL window), and by
 running FCEUX (`fceux-am`, `mario.nes`) in both character mode (full ASCII title
 screen) and full graphical mode (correct, colored Super Mario title screen), all on
-the actual RTL core via Verilator.
+the actual RTL core via Verilator. Real keyboard input was added on top afterward
+(beyond what D5 asks for) — real SDL key events, mapped and queued the same way
+NEMU's own `keyboard.c` does — verified both standalone (`am-tests`' keyboard test)
+and via actual FCEUX gameplay.
 
 See [`npc/README.md`](ysyx-workbench/npc/README.md) for the full breakdown of what's in
 each subfolder (`xor-test/`, `nvboard-xor/`, `nvboard-light/`, `scpu-rtl/`, `dpi-test/`,

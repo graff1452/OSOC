@@ -281,6 +281,38 @@ on long device-driven runs like FCEUX (150M+ cycles). Capped to the first
 `TRACE_CYCLES = 200000` cycles only — long runs still simulate correctly past that
 point, just without dumping every single edge to `wave.fst`.
 
+**Keyboard (beyond D5's required scope, added afterward):** not asked for by the
+handout, but implemented the same way as everything else here — a `KBD_ADDR =
+0xa0000060` the guest reads to pop one key event off a queue. `main.cpp` captures real
+`SDL_KEYDOWN`/`SDL_KEYUP` events (previously just discarded, to stop the OS thinking the
+window had frozen) and maps them to `AM_KEY_*` codes via the same scancode-lookup-table
+trick NEMU's own `keyboard.c` uses — duplicated locally in `main.cpp` rather than
+`#include`d, since `amdev.h` is a guest-side header this host-compiled file can't use.
+AM-side `input.c` mirrors NEMU's own AM-side `input.c` line for line: unpack the
+keydown-flag bit and keycode from one `inl(KBD_ADDR)` read. Gated behind an
+`ENABLE_KEYBOARD` `#define` (comment it out to disable capture entirely — a `KBD_ADDR`
+read then costs nothing beyond an immediate return, matching pre-keyboard behavior
+exactly) so it can be turned off without touching `input.c` or any other file — the
+toggle lives entirely in `main.cpp`, since `input.c` only ever asks "what's at this
+address," it has no idea whether real capture is happening behind that answer.
+
+**Two more real bugs, both caught by actually testing rather than assuming:**
+- The first version of the `ENABLE_KEYBOARD` toggle only gated the event-processing
+  *logic* inside `poll_sdl_events()`, not the *call* to it from `pmem_read`'s `KBD_ADDR`
+  check — so disabling the feature still ran a real `SDL_PollEvent()` on every keyboard
+  read, just discarding the result. Measurably slower than before the feature existed
+  at all (where `KBD_ADDR` wasn't a recognized address, so reads fell through to the
+  cheap "unknown address" path). Fixed by gating the call itself, not just its contents.
+- Separately, a pasted-in edit left the live `main()` as an unconditional `while (1)` —
+  no `sim_finished`/`MAX_CYCLES` check at all, so `ebreak` stopped doing anything, and
+  the entire `TRACE_CYCLES` fix above (guarding `tfp->dump()`) existed only in a dead,
+  commented-out copy of the function further down the file, never actually running.
+  Every test — not just FCEUX — would have run forever, dumping the full waveform
+  unbounded the whole time. A reminder that leaving old code commented-out "just in
+  case" in the same file as the live version is a real hazard, not harmless — it's easy
+  to edit the wrong copy, or for a paste to land in the wrong place. Deleted the dead
+  block entirely once found.
+
 **Verified:**
 - `am-kernels/kernels/hello` (`make ARCH=minirv-npc run`): prints
   `Hello, AbstractMachine!` for real, through `outb()` → `sb` → `lsu.v` →
@@ -292,6 +324,10 @@ point, just without dumping every single edge to `wave.fst`.
   window shows the expected animated colored-square pattern, confirming the whole
   `AM_GPU_FBDRAW` → `gpu.c` → `pmem_write`'s `FB_ADDR` check → `vmem[]` →
   `vga_redraw()` chain end to end.
+- `am-kernels/tests/am-tests` (`make ARCH=minirv-npc mainargs=k run`): real key
+  presses (arrows, letters) correctly printed as `Got (kbd): UP (73) DOWN`-style
+  lines, matching NEMU's own output format exactly, confirming the whole
+  SDL-capture → scancode-map → queue → `KBD_ADDR` → `input.c` chain end to end.
 - `fceux-am` character mode (`HAS_GUI` commented out in `src/config.h`,
   `make ARCH=minirv-npc run`): boots to a full, recognizable ASCII-art Super Mario
   title screen, rendered entirely through the UART path above — no VGA needed for
@@ -304,7 +340,10 @@ point, just without dumping every single edge to `wave.fst`.
   correct, fully colored Super Mario title screen in a real SDL window — the actual
   goal of D5's optional section. Same as character mode, runs indefinitely by
   design; a run was left going 2 billion cycles (`HIT BAD TRAP (timeout)`) with the
-  image stable and correct throughout, rather than stopped early.
+  image stable and correct throughout, rather than stopped early. With keyboard
+  input also working, real gameplay is possible: FCEUX's own default control
+  scheme (`src/drivers/sdl/input.cpp`) maps `WASD` to the D-pad, `J`/`K` to
+  A/B, `U`/`I` to Select/Start — not arrow keys.
 
 **`fceux-am` gotcha (repo-boundary, not npc-specific):** `fceux-am` is cloned as its
 *own* separate git repo, independent of `OSOC`. Local edits to it don't get carried
