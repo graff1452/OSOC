@@ -7,7 +7,7 @@ Personal coursework repository for the "一生一芯" (ysyx / One Student One Ch
 [Structure](#structure) ·
 [F6 (Logisim)](#f--f6-mini-risc-v-processor-logisim) ·
 [E-phase sims](#e--e-phase-instruction-set-simulators) ·
-[NPC (RTL)](#npc--rtl-reimplementation-d4-complete-d5-in-progress) ·
+[NPC (RTL)](#npc--rtl-reimplementation-d4-and-d5-complete) ·
 [NEMU / PA1 & PA2 detail log](#nemu--e6pa1--pa2-njus-ics-simple-debugger--rv32im-computer-system) ·
 [Related repos](#related-repos-not-included-here) ·
 [Setting up a new machine](#setting-up-a-new-machine) ·
@@ -295,7 +295,7 @@ gcc -Wall -Wextra minirvemu.c -o minirvemu
 Cloned from [OSCPU/ysyx-workbench](https://github.com/OSCPU/ysyx-workbench). This is the
 scaffold the course builds up incrementally via `init.sh`.
 
-### `npc/` — RTL Reimplementation (D4 complete, D5 in progress)
+### `npc/` — RTL Reimplementation (D4 and D5 complete)
 
 Reimplementation of the `minirv` processor from `f/` in real Verilog/RTL, verified with
 Verilator. D4 is done: a complete 8-instruction `minirv` core (`addi`, `add`, `lui`,
@@ -303,14 +303,16 @@ Verilator. D4 is done: a complete 8-instruction `minirv` core (`addi`, `add`, `l
 simulation control, and full AM toolchain integration (`minirv-npc` target) — verified
 by running real compiled C programs, 35/35 passing on `cpu-tests`.
 
-D5 (devices and I/O) is in progress: UART output and a real-time clock are implemented
-purely by adding address checks to the existing DPI-C `pmem_read`/`pmem_write`
-functions — **no RTL changes at all** — plus the matching AM-side platform code
-(`putch()`, `__am_timer_uptime()`). Verified with the `hello` kernel (real text output)
-and `am-tests`' real-time clock test (ticks once per real second), and further stress-
-tested by booting character-mode FCEUX (`fceux-am`, `mario.nes`) to a full, recognizable
-ASCII title screen running on the actual RTL core. VGA (graphical Mario) is the
-remaining optional piece, not yet started.
+D5 (devices and I/O) is done, including the optional VGA section. UART, a real-time
+clock, and VGA are all implemented purely by adding address checks to the existing
+DPI-C `pmem_read`/`pmem_write` functions — **no changes to the `minirv` RTL itself** —
+plus the matching AM-side platform code (`trm.c`'s `putch()`, `timer.c`'s
+`__am_timer_uptime()`, and a new `gpu.c` mirroring NEMU's own). Verified with the
+`hello` kernel (real text output), `am-tests`' real-time clock test (ticks once per
+real second) and video test (correct animated pattern in a real SDL window), and by
+running FCEUX (`fceux-am`, `mario.nes`) in both character mode (full ASCII title
+screen) and full graphical mode (correct, colored Super Mario title screen), all on
+the actual RTL core via Verilator.
 
 See [`npc/README.md`](ysyx-workbench/npc/README.md) for the full breakdown of what's in
 each subfolder (`xor-test/`, `nvboard-xor/`, `nvboard-light/`, `scpu-rtl/`, `dpi-test/`,

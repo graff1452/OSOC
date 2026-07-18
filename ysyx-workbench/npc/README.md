@@ -169,7 +169,7 @@ trick, so the large majority of their test files exercise instructions genuinely
 from this RTL by design; `cpu-tests`'s 35/35 was judged sufficient evidence for D4's
 actual scope.
 
-## D5 — Devices and I/O (in progress)
+## D5 — Devices and I/O (complete, including optional VGA)
 
 MMIO for NPC needed **zero RTL changes** — `ifu.v` and `lsu.v` already funnel every
 instruction fetch and every load/store through `pmem_read()`/`pmem_write()` in
@@ -239,28 +239,88 @@ a placeholder — matches NEMU's own known limitation, not a new gap.
   with `Ctrl+C` once the image is visibly stable, same as the `donut` demo from
   PA2.3.
 
-**Not yet done — VGA (optional per the handout):** a real framebuffer region
-(`FB_ADDR`, one `uint32_t` per pixel across the whole screen) plus a small VGA control
-register (`VGACTL_ADDR`: word 0 = `(width<<16)|height`, word 1 = a sync flag the
-program sets after finishing a frame). Structurally different from UART/clock — this is
-an address *range* to recognize, not a single fixed address — and needs a new `gpu.c`
-under `abstract-machine/am/src/riscv/npc/` (doesn't exist yet) registered into
-`ioe.c`'s dispatch table, plus something on the `main.cpp` side to actually display the
-framebuffer (likely SDL, mirroring NEMU's own `vga.c`).
+**VGA:** a real framebuffer region (`FB_ADDR = 0xa1000000`, one `uint32_t` per pixel
+across a `400×300` screen, `480,000` bytes total) plus a small VGA control register
+(`VGACTL_ADDR = 0xa0000100`: word 0 = `(width<<16)|height`, read-only; word 0+4 = a
+sync-trigger the program writes to after finishing a frame). Structurally different from
+UART/clock — this is an address *range* to recognize in `pmem_write`, not a single fixed
+address, and unlike NEMU (which decouples "flag written" from "redraw" via a separate
+periodic polling function), NPC's `pmem_write` has no equivalent background loop — it
+only ever runs synchronously, in direct response to a store instruction — so the sync
+write triggers the redraw immediately, right there in the same function call.
+
+AM-side: a new `abstract-machine/am/src/riscv/npc/gpu.c`, mirroring NEMU's own `gpu.c`
+field-for-field (`__am_gpu_config`, `__am_gpu_fbdraw`, `__am_gpu_status`, same
+`AM_GPU_CONFIG_T`/`AM_GPU_FBDRAW_T`/`AM_GPU_STATUS_T` fields from `amdev.h`), registered
+into `ioe.c`'s `lut[]` dispatch table, and added to `AM_SRCS` in
+`scripts/platform/npc.mk` (unlike `trm.c`/`timer.c`/`ioe.c`, new files aren't
+auto-discovered — that list is explicit, and a new file sitting on disk but missing from
+it just never gets compiled, silently). `main.cpp`-side: a `vmem[]` pixel array plus a
+real SDL window (`init_vga_if_needed()` lazy-inits it — so running `hello`/`cpu-tests`
+never pops up a window — `vga_redraw()` does the same `SDL_UpdateTexture` →
+`SDL_RenderClear` → `SDL_RenderCopy` → `SDL_RenderPresent` sequence NEMU's own
+`update_screen()` uses). Needed one addition to the Verilator build command that UART/
+clock never did — SDL flags, since nothing linked against it before:
+```
+-CFLAGS "$(sdl2-config --cflags)" -LDFLAGS "$(sdl2-config --libs)"
+```
+
+**Real bug hit again here:** the exact "access nonexist register" panic from `ioe.c`
+showed up a second time, later, for a different reason than the `fceux-am` repo-boundary
+issue below — attempting `HAS_GUI` on before `gpu.c`/`ioe.c`/`AM_SRCS` were actually
+written and wired up. Confirms the general shape of the earlier UART/clock bugs: turning
+a feature "on" (`HAS_GUI`) only controls whether a program *attempts* to use a device —
+whether that attempt succeeds depends entirely on whether an implementation exists to
+answer it. `ARCH=riscv32-nemu`/`ARCH=native` never hit this because their `gpu.c`
+(`am/src/platform/nemu/ioe/gpu.c`, `am/src/native/ioe/gpu.c`) already shipped as part of
+the framework — NPC's didn't exist until this work wrote it.
+
+Also worth noting: the long-running waveform trace (`tfp->dump()` on every clock edge,
+unconditionally, since D4) is fine for short unit tests but risks unbounded disk growth
+on long device-driven runs like FCEUX (150M+ cycles). Capped to the first
+`TRACE_CYCLES = 200000` cycles only — long runs still simulate correctly past that
+point, just without dumping every single edge to `wave.fst`.
+
+**Verified:**
+- `am-kernels/kernels/hello` (`make ARCH=minirv-npc run`): prints
+  `Hello, AbstractMachine!` for real, through `outb()` → `sb` → `lsu.v` →
+  `pmem_write()` → `putchar()`.
+- `am-kernels/tests/am-tests` (`make ARCH=minirv-npc mainargs=t run`): prints one
+  line per real elapsed second, confirming `__am_timer_uptime()`'s microsecond count
+  tracks actual wall-clock time, not a fake counter.
+- `am-kernels/tests/am-tests` (`make ARCH=minirv-npc mainargs=v run`): a real SDL
+  window shows the expected animated colored-square pattern, confirming the whole
+  `AM_GPU_FBDRAW` → `gpu.c` → `pmem_write`'s `FB_ADDR` check → `vmem[]` →
+  `vga_redraw()` chain end to end.
+- `fceux-am` character mode (`HAS_GUI` commented out in `src/config.h`,
+  `make ARCH=minirv-npc run`): boots to a full, recognizable ASCII-art Super Mario
+  title screen, rendered entirely through the UART path above — no VGA needed for
+  this part. FCEUX's own internal FPS/timing readout (`(System time: ...s)`) is a
+  second, independent confirmation the clock works, on top of the RTC test.
+  Runs indefinitely by design (continuous redraw loop, never calls `ebreak`) — stop
+  with `Ctrl+C` once the image is visibly stable, same as the `donut` demo from
+  PA2.3.
+- `fceux-am` graphical mode (`HAS_GUI` on, `make ARCH=minirv-npc run`): boots to a
+  correct, fully colored Super Mario title screen in a real SDL window — the actual
+  goal of D5's optional section. Same as character mode, runs indefinitely by
+  design; a run was left going 2 billion cycles (`HIT BAD TRAP (timeout)`) with the
+  image stable and correct throughout, rather than stopped early.
 
 **`fceux-am` gotcha (repo-boundary, not npc-specific):** `fceux-am` is cloned as its
-*own* separate git repo, independent of `OSOC`. Local edits to it (e.g. commenting out
-`#define HAS_GUI` in `src/config.h` for character mode) don't get carried along by
-anything in `OSOC` itself — they need their own `git commit`/`push` inside
-`fceux-am/`, or a fresh clone reverts them. Cost real debugging time once: a fresh
-clone silently had `HAS_GUI` back on, `sdl-video.cpp`'s GPU calls
-(`io_read(AM_GPU_CONFIG)`, `io_write(AM_GPU_FBDRAW)`) are only compiled in `#ifdef
-HAS_GUI`, and neither register is in `ioe.c`'s lookup table yet — so it ran fine for a
-long while (the ASCII path this replaces only becomes unreachable once the emulated
-NES produces an actual first frame, which took ~150M cycles to reach) before panicking
-with `access nonexist register`. As of writing, `HAS_GUI` is commented out locally but
-*not* committed — deliberately, since VGA work below is about to need it back on
-anyway. Don't assume this state survives a fresh clone.
+*own* separate git repo, independent of `OSOC`. Local edits to it don't get carried
+along by anything in `OSOC` itself — they need their own `git commit`/`push` inside
+`fceux-am/`, or a fresh clone reverts them. Cost real debugging time once: after
+commenting out `#define HAS_GUI` for character mode without committing it in
+`fceux-am`'s own repo, a fresh clone on a second machine silently had `HAS_GUI` back on.
+Since `gpu.c`/`ioe.c` didn't exist yet at that point, `sdl-video.cpp`'s GPU calls
+(`io_read(AM_GPU_CONFIG)`, `io_write(AM_GPU_FBDRAW)`, only compiled in `#ifdef HAS_GUI`)
+ran fine for a long while — the ASCII path this replaces only becomes unreachable once
+the emulated NES produces an actual first frame, which took ~150M cycles to reach —
+before panicking with `access nonexist register`. Now that `gpu.c` is written and
+`HAS_GUI` genuinely works, it's been committed for real in `fceux-am`'s own repo (not
+`OSOC`) as the final state — this isn't a live footgun anymore, just a reminder that
+edits to `fceux-am`/`am-kernels`/`nvboard` (all separate repos from `OSOC`) need their
+own commits.
 
 ## Running things
 
