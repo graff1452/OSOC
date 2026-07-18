@@ -72,6 +72,13 @@ true yet.
 ```bash
 cd ~/Desktop/OSOC/ysyx-workbench
 
+# NEMU_HOME: nemu/ ships pre-populated inside this repo (committed directly, .git
+# stripped), so `bash init.sh nemu` will just print "already initialized, skipping"
+# and silently do nothing -- including never setting NEMU_HOME. Set it directly:
+echo "export NEMU_HOME=$(readlink -f nemu)" >> ~/.bashrc
+source ~/.bashrc
+echo $NEMU_HOME   # sanity check -- should print the nemu path, not blank
+
 # one-time OS packages -- covers everything below (cpu-tests, IOE devices, malloc/demo)
 sudo apt-get install bison flex libreadline-dev python-is-python3 \
   g++-riscv64-linux-gnu binutils-riscv64-linux-gnu \
@@ -500,8 +507,11 @@ re-executed and register-compared against Spike, zero mismatches.
   evaluate as signed `int` until the final assignment — caused wrong answers on any
   expression involving negative intermediate division results
 
-**Setup:** needs `bash init.sh nemu` (sets `$NEMU_HOME`), `bison flex libreadline-dev`,
-and (Ubuntu-specific) a one-line comment-out of `gnu/stubs-ilp32.h`'s include in
+**Setup:** needs `NEMU_HOME` set (`echo "export NEMU_HOME=$(readlink -f nemu)" >>
+~/.bashrc && source ~/.bashrc` — **not** `bash init.sh nemu`, which no-ops on a fresh
+clone of this repo since `nemu/` already ships populated; see the "Build NEMU" note at
+the top of this README), `bison flex libreadline-dev`, and (Ubuntu-specific) a one-line
+comment-out of `gnu/stubs-ilp32.h`'s include in
 `/usr/riscv64-linux-gnu/include/gnu/stubs.h` to work around a missing 32-bit multilib
 header. Configure via `make menuconfig` (Base ISA → riscv32, leave "Application on
 Abstract-Machine" **unselected** — that option is for a different build mode and will
@@ -715,11 +725,16 @@ echo exit | ./bin/iEDA -v
 ```
 
 **9. Build NEMU from source.** Only the *source code* is saved in git — the compiled
-program itself isn't, so it has to be rebuilt on every new machine:
+program itself isn't, so it has to be rebuilt on every new machine. `nemu/` ships
+pre-populated inside this repo (committed directly, `.git` stripped) — `bash init.sh
+nemu` will just print `"nemu is already initialized, skipping..."` and silently do
+nothing, **including never setting `NEMU_HOME`**, since that only happens the very
+first time `init.sh` actually clones something. Set it directly instead:
 ```bash
 cd ~/Desktop/OSOC/ysyx-workbench
-bash init.sh nemu
+echo "export NEMU_HOME=$(readlink -f nemu)" >> ~/.bashrc
 source ~/.bashrc
+echo $NEMU_HOME   # sanity check -- should print the nemu path, not blank
 sudo apt-get install bison flex libreadline-dev
 sudo apt-get install g++-riscv64-linux-gnu binutils-riscv64-linux-gnu python-is-python3
 sudo apt-get install libsdl2-dev libsdl2-image-dev libsdl2-ttf-dev
@@ -787,12 +802,55 @@ course's own upstream source, nothing personal to track down.
   run`, because `trm.o` from *before* the fix was still sitting there looking
   "up to date" to Make. A full `rm -rf am/build klib/build <program>/build` is the
   reliable fix when a previous build attempt errored out partway through.
+  Same failure mode showed up worse on two separate machines while building
+  `fceux-am`: `emufile.o` on disk was only 40 bytes and `file` reported it as
+  plain `data`, not a real object. Root cause, confirmed by reproducing it: a test
+  script wrapped `make ARCH=minirv-npc run` in a short `timeout`, but that command
+  compiles ~200 C++ files (every FCEUX board driver) *and* runs the simulation as
+  one unit — compiling alone can take several minutes, so the timeout killed `g++`
+  mid-write on whatever file it was compiling at the time, leaving a truncated
+  object behind. The next `make` then trusted that corrupt file as "already built"
+  and handed it straight to the linker, which failed with `file not recognized:
+  file format not recognized`. Fix at the source: never wrap a *build* step in a
+  short timeout — only the *run* step is unbounded by design (FCEUX loops
+  forever), so only that step should ever be time-limited; building must always be
+  allowed to run to completion. When this class of corruption does happen (from
+  this bug or any other interrupted build), the recovery is the same as above:
+  ```bash
+  rm -rf ~/Desktop/OSOC/ysyx-workbench/abstract-machine/am/build
+  rm -rf ~/Desktop/OSOC/ysyx-workbench/abstract-machine/klib/build
+  rm -rf ~/Desktop/OSOC/ysyx-workbench/fceux-am/build   # or whichever program's build/
+  cd ~/Desktop/OSOC/ysyx-workbench/fceux-am
+  make ARCH=minirv-npc run 2>&1 | tee /tmp/build.log   # tee: so a repeat failure is
+                                                        # scrollable, not just a tail
+  ```
 - Verilator's own build (`verilator -cc --exe --build ...` inside `minirv-rtl/`)
   and the AM program build (`make ARCH=minirv-npc run` from a kernel/test
   directory) are two entirely separate build systems that happen to share a
   directory — `make ARCH=minirv-npc run` never rebuilds `Vminirv` itself, only
   the `.bin` it hands to whatever `Vminirv` already exists on disk. Editing
   `minirv-rtl/csrc/main.cpp` always needs its own explicit Verilator rebuild.
+- `bash init.sh nemu` looks like it sets `NEMU_HOME`, but only does so the *first*
+  time it actually clones something — `init()`'s very first check is `if [ -d nemu ];
+  then echo "already initialized, skipping"; return; fi`, which exits before ever
+  reaching the `addenv` call that writes `NEMU_HOME` to `~/.bashrc`. Since `nemu/`
+  ships committed directly inside *this* repo (`.git` stripped, tracked as regular
+  files), a fresh `git clone` of `OSOC` already has `nemu/` populated — so on any new
+  machine, `bash init.sh nemu` immediately hits that early return and silently does
+  nothing at all, `NEMU_HOME` included. Symptom: `make` inside `nemu/` fails instantly
+  with `NEMU_HOME= is not a NEMU repo`, and every single `cpu-tests` test then fails
+  too, since `./build/riscv32-nemu-interpreter` was never actually built. Fix: set
+  `NEMU_HOME` directly — `echo "export NEMU_HOME=$(readlink -f nemu)" >> ~/.bashrc &&
+  source ~/.bashrc` — don't rely on `init.sh nemu` to do it on this repo.
+- Building `nemu/` prints `flock: cannot open lock file .../nemu/../.git/: No such
+  file or directory` and `sync: error opening '.../nemu/../.git/'...`, both marked
+  `(ignored)` by Make itself, right after `+ LD .../riscv32-nemu-interpreter`. This is
+  expected, not a real error — same "originality tracking" `git_commit` mechanism
+  already noted for the top-level `npc/` `Makefile`'s `sim` target below, just showing
+  up here because `nemu/`'s own `.git` was stripped when it got committed directly
+  into this repo (same reason `bash init.sh nemu` no-ops, see the `NEMU_HOME` note
+  above). The recipe is deliberately written to allow this specific step to fail
+  without blocking the real build — confirmed by Make's own `(ignored)` annotation.
 - `nemu/tools/spike-diff`'s `make` needs `GUEST_ISA=riscv32` passed explicitly —
   it isn't picked up from NEMU's own `.config` automatically the way other
   Makefiles in this project do. Symptom if forgotten: it still builds

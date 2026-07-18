@@ -248,6 +248,20 @@ under `abstract-machine/am/src/riscv/npc/` (doesn't exist yet) registered into
 `ioe.c`'s dispatch table, plus something on the `main.cpp` side to actually display the
 framebuffer (likely SDL, mirroring NEMU's own `vga.c`).
 
+**`fceux-am` gotcha (repo-boundary, not npc-specific):** `fceux-am` is cloned as its
+*own* separate git repo, independent of `OSOC`. Local edits to it (e.g. commenting out
+`#define HAS_GUI` in `src/config.h` for character mode) don't get carried along by
+anything in `OSOC` itself — they need their own `git commit`/`push` inside
+`fceux-am/`, or a fresh clone reverts them. Cost real debugging time once: a fresh
+clone silently had `HAS_GUI` back on, `sdl-video.cpp`'s GPU calls
+(`io_read(AM_GPU_CONFIG)`, `io_write(AM_GPU_FBDRAW)`) are only compiled in `#ifdef
+HAS_GUI`, and neither register is in `ioe.c`'s lookup table yet — so it ran fine for a
+long while (the ASCII path this replaces only becomes unreachable once the emulated
+NES produces an actual first frame, which took ~150M cycles to reach) before panicking
+with `access nonexist register`. As of writing, `HAS_GUI` is commented out locally but
+*not* committed — deliberately, since VGA work below is about to need it back on
+anyway. Don't assume this state survives a fresh clone.
+
 ## Running things
 
 Each subfolder is self-contained:
