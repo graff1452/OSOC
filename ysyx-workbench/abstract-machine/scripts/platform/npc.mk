@@ -3,10 +3,11 @@ AM_SRCS := riscv/npc/start.S \
            riscv/npc/ioe.c \
            riscv/npc/timer.c \
            riscv/npc/input.c \
+           riscv/npc/gpu.c \
            riscv/npc/cte.c \
            riscv/npc/trap.S \
            platform/dummy/vme.c \
-           platform/dummy/mpe.c
+           platform/dummy/mpe.c \
 
 CFLAGS    += -fdata-sections -ffunction-sections
 CFLAGS    += -I$(AM_HOME)/am/src/riscv/npc/include
