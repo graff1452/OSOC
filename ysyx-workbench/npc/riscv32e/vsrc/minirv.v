@@ -5,7 +5,10 @@ module minirv
   output [31:0] pc,
   output [3:0]  dbg_rd,
   output [31:0] dbg_wdata,
-  output [31:0] dbg_a0
+  output [31:0] dbg_a0,
+  output [31:0] dbg_mem_addr,
+  output        dbg_mem_wen,
+  output        dbg_mem_ren
 );
 
   import "DPI-C" function void npc_trap();
@@ -140,6 +143,9 @@ module minirv
 
   assign dbg_rd    = rd;
   assign dbg_wdata = wdata;
+  assign dbg_mem_addr = alu_result;
+  assign dbg_mem_wen  = lsu_wen;
+  assign dbg_mem_ren  = lsu_ren;
 
   always @(posedge clk) 
   begin

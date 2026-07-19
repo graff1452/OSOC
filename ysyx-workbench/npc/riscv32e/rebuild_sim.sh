@@ -22,7 +22,7 @@ fi
 verilator -cc --exe --build -Mdir build --top-module minirv --trace-fst \
   vsrc/templates.v vsrc/ifu.v vsrc/decoder.v vsrc/regfile.v vsrc/alu.v vsrc/lsu.v vsrc/minirv.v \
   csrc/main.cpp \
-  -CFLAGS "$(sdl2-config --cflags)" -LDFLAGS "$(sdl2-config --libs) -lreadline"
+  -CFLAGS "$(sdl2-config --cflags)" -LDFLAGS "$(sdl2-config --libs) -lreadline -ldl"
 
 echo ""
 echo "Build OK: $(pwd)/build/Vminirv"

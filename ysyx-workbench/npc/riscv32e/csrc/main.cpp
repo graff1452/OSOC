@@ -11,6 +11,7 @@
 #include <SDL2/SDL.h>
 #include <readline/readline.h>
 #include <readline/history.h>
+#include <dlfcn.h>
 
 #define PMEM_BASE 0x80000000u
 #define MEM_SIZE  (128 * 1024 * 1024)
@@ -89,7 +90,7 @@ static void init_vga_if_needed()
 {
     if (vga_window) return;   // already initialized -- only open the window once
     SDL_Init(SDL_INIT_VIDEO);
-    SDL_CreateWindowAndRenderer(SCREEN_W*3, SCREEN_H*3, 0, &vga_window, &vga_renderer);
+    SDL_CreateWindowAndRenderer(SCREEN_W, SCREEN_H, 0, &vga_window, &vga_renderer);
     SDL_SetWindowTitle(vga_window, "minirv-npc");
     vga_texture = SDL_CreateTexture(vga_renderer, SDL_PIXELFORMAT_ARGB8888,
                                      SDL_TEXTUREACCESS_STATIC, SCREEN_W, SCREEN_H);
@@ -186,6 +187,8 @@ extern "C" void pmem_write(int waddr, int wdata, char wmask)
     }
 }
 
+static long g_image_size = 0;
+
 static void load_image(const char *path) 
 {
     FILE *fp = fopen(path, "rb");
@@ -200,6 +203,7 @@ static void load_image(const char *path)
     fread(pmem, 1, size, fp);
     fclose(fp);
     printf("loaded %ld bytes from %s\n", size, path);
+    g_image_size = size;
 }
 
 bool sim_finished = false;
@@ -211,6 +215,48 @@ static const char *reg_names[16] = {
     "s0",   "s1", "a0", "a1", "a2", "a3", "a4", "a5"
 };
 
+// ---- DiffTest: compare every instruction's result against NEMU (as REF) ----
+// Mirrors NEMU's own riscv32_CPU_state layout exactly. NEMU here is configured
+// RV32IM (32 registers), not RV32E, so this struct needs all 32 slots even though
+// our real hardware only has 16 -- the extra slots are simply never touched by
+// real RV32E programs, whose 4-bit register fields can't encode x16-x31 at all.
+struct DifftestCPUState { uint32_t gpr[32]; uint32_t pc; };
+enum { DIFFTEST_TO_DUT = 0, DIFFTEST_TO_REF = 1 };
+
+static void (*ref_difftest_memcpy)(uint32_t addr, void *buf, size_t n, int direction) = nullptr;
+static void (*ref_difftest_regcpy)(void *dut, int direction) = nullptr;
+static void (*ref_difftest_exec)(uint64_t n) = nullptr;
+static void (*ref_difftest_init)(int port) = nullptr;
+static bool difftest_enabled  = false;
+static bool difftest_mismatch = false;
+static bool g_touched_device  = false;   // recomputed fresh every cycle from settled port values
+
+static void difftest_load(const char *so_path)
+{
+    void *handle = dlopen(so_path, RTLD_LAZY);
+    if (!handle) { fprintf(stderr, "dlopen('%s') failed: %s\n", so_path, dlerror()); exit(1); }
+
+    ref_difftest_memcpy = (void(*)(uint32_t,void*,size_t,int))dlsym(handle, "difftest_memcpy");
+    ref_difftest_regcpy = (void(*)(void*,int))dlsym(handle, "difftest_regcpy");
+    ref_difftest_exec   = (void(*)(uint64_t))dlsym(handle, "difftest_exec");
+    ref_difftest_init   = (void(*)(int))dlsym(handle, "difftest_init");
+    if (!ref_difftest_memcpy || !ref_difftest_regcpy || !ref_difftest_exec || !ref_difftest_init) {
+        fprintf(stderr, "dlsym failed for one or more difftest_* functions: %s\n", dlerror());
+        exit(1);
+    }
+
+    ref_difftest_init(0);
+    ref_difftest_memcpy(PMEM_BASE, pmem, g_image_size, DIFFTEST_TO_REF);
+
+    DifftestCPUState init_state;
+    memset(&init_state, 0, sizeof(init_state));
+    init_state.pc = PMEM_BASE;
+    ref_difftest_regcpy(&init_state, DIFFTEST_TO_REF);
+
+    difftest_enabled = true;
+    printf("DiffTest enabled, REF loaded from %s\n", so_path);
+}
+
 static Vminirv        *g_top   = nullptr;
 static VerilatedFstC   *g_tfp   = nullptr;
 static vluint64_t       g_time  = 0;
@@ -218,13 +264,74 @@ static long long        g_cycles = 0;
 static const long long  MAX_CYCLES   = 2000000000LL;
 static const long long  TRACE_CYCLES = 200000;   // only dump waveform for the first ~200k cycles
 
+// Called once per real instruction retired (this core is single-cycle: one
+// instruction per clock cycle, so once per step_n_cycles loop iteration).
+static bool is_device_addr(uint32_t addr)
+{
+    if (addr == UART_ADDR) return true;
+    if (addr == RTC_ADDR || addr == RTC_ADDR + 4) return true;
+    if (addr == KBD_ADDR) return true;
+    if (addr == VGACTL_ADDR || addr == VGACTL_ADDR + 4) return true;
+    if (addr >= FB_ADDR && addr < FB_ADDR + FB_SIZE) return true;
+    return false;
+}
+
+static void difftest_check_one_instruction()
+{
+    if (g_touched_device) {
+        // Do NOT call ref_difftest_exec here -- NEMU has no device model when
+        // built for DiffTest (its own Kconfig forbids it), and would abort
+        // trying to actually execute a store/load to a device address (its own
+        // memory checker treats it as out-of-bounds and crashes the whole
+        // process). Instead, just force REF's state to match DUT's
+        // post-instruction state directly -- REF "catches up" without ever
+        // being asked to interpret this particular instruction at all.
+        DifftestCPUState dut_state;
+        memset(&dut_state, 0, sizeof(dut_state));
+        for (int i = 0; i < 16; i++) dut_state.gpr[i] = (uint32_t)get_reg_val(i);
+        dut_state.pc = g_top->pc;
+        ref_difftest_regcpy(&dut_state, DIFFTEST_TO_REF);
+        return;
+    }
+
+    ref_difftest_exec(1);
+    DifftestCPUState ref_state;
+    ref_difftest_regcpy(&ref_state, DIFFTEST_TO_DUT);
+
+    for (int i = 0; i < 16; i++) {
+        uint32_t dut_val = (uint32_t)get_reg_val(i);
+        if (dut_val != ref_state.gpr[i]) {
+            printf("DIFFTEST MISMATCH at cycle %lld: x%d (%s)  dut=0x%08x  ref=0x%08x\n",
+                   g_cycles, i, reg_names[i], dut_val, ref_state.gpr[i]);
+            difftest_mismatch = true;
+        }
+    }
+    uint32_t dut_pc = g_top->pc;
+    if (dut_pc != ref_state.pc) {
+        printf("DIFFTEST MISMATCH at cycle %lld: pc  dut=0x%08x  ref=0x%08x\n",
+               g_cycles, dut_pc, ref_state.pc);
+        difftest_mismatch = true;
+    }
+}
+
 static void step_n_cycles(long long n)
 {
-    for (long long i = 0; i < n && !sim_finished && g_cycles < MAX_CYCLES; i++)
+    for (long long i = 0; i < n && !sim_finished && g_cycles < MAX_CYCLES && !difftest_mismatch; i++)
     {
         g_top->clk = 0; g_top->eval(); if (g_cycles < TRACE_CYCLES) g_tfp->dump(g_time++);
+        // Sample here, between the edges: pc/inst/dbg_mem_* still combinationally
+        // reflect the instruction actually executing THIS cycle. Reading them after
+        // the next posedge (below) would instead show a preview of the NEXT
+        // instruction's decode, since Verilator settles that same combinational
+        // chain (including the next fetch) within the same eval() that updates pc --
+        // this is exactly the bug that caused false device-touch detections before.
+        g_touched_device = (g_top->dbg_mem_wen || g_top->dbg_mem_ren)
+                          && is_device_addr(g_top->dbg_mem_addr);
         g_top->clk = 1; g_top->eval(); if (g_cycles < TRACE_CYCLES) g_tfp->dump(g_time++);
         g_cycles++;
+        if (difftest_enabled && !sim_finished) {
+            difftest_check_one_instruction();
+        }
         if (g_cycles % 10000000 == 0) {
             fprintf(stderr, "... %lld cycles simulated\n", g_cycles);
         }
@@ -233,7 +340,11 @@ static void step_n_cycles(long long n)
 
 static void report_result()
 {
-    if (sim_finished) 
+    if (difftest_mismatch)
+    {
+        printf("DIFFTEST FAILED -- DUT and REF diverged, see mismatch above (%lld cycles)\n", g_cycles);
+    }
+    else if (sim_finished) 
     {
         int a0 = g_top->dbg_a0;
         if (a0 == 0) 
@@ -252,7 +363,7 @@ static void cmd_si(const char *args)
     long long n = 1;
     if (args && *args) n = atoll(args);
     step_n_cycles(n);
-    if (sim_finished || g_cycles >= MAX_CYCLES) report_result();
+    if (sim_finished || g_cycles >= MAX_CYCLES || difftest_mismatch) report_result();
 }
 
 static void cmd_info_r()
@@ -304,7 +415,7 @@ static void sdb_loop()
         else printf("Unknown command '%s'. Try: si [N], info r, x N ADDR, c, q\n", cmd);
 
         free(line);
-        if (sim_finished || g_cycles >= MAX_CYCLES) break;
+        if (sim_finished || g_cycles >= MAX_CYCLES || difftest_mismatch) break;
     }
 }
 
@@ -312,13 +423,15 @@ int main(int argc, char** argv)
 {
     bool interactive = false;
     const char *image_path = nullptr;
+    const char *diff_so_path = nullptr;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-i") == 0) interactive = true;
+        else if (strcmp(argv[i], "--diff") == 0 && i + 1 < argc) diff_so_path = argv[++i];
         else image_path = argv[i];
     }
     if (!image_path) 
     {
-        printf("usage: %s [-i] <image.bin>\n", argv[0]);
+        printf("usage: %s [-i] [--diff <ref.so>] <image.bin>\n", argv[0]);
         return 1;
     }
     load_image(image_path);
@@ -349,6 +462,10 @@ int main(int argc, char** argv)
         fprintf(stderr, "WARNING: could not find DPI scope for u_reg -- 'info r' will not work\n");
     }
 
+    if (diff_so_path) {
+        difftest_load(diff_so_path);
+    }
+
     if (interactive) 
     {
         sdb_loop();
@@ -365,4 +482,3 @@ int main(int argc, char** argv)
     delete g_top;
     return 0;
 }
-
