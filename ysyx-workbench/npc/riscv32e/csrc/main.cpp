@@ -258,9 +258,10 @@ static void itrace_init(const char *capstone_so_path)
 }
 
 #define IRINGBUF_SIZE 16
-static char iringbuf[IRINGBUF_SIZE][256];
-static int  iringbuf_idx   = 0;
-static int  iringbuf_count = 0;
+struct IringEntry { uint32_t pc; uint32_t inst; };
+static IringEntry iringbuf[IRINGBUF_SIZE];
+static int iringbuf_idx   = 0;
+static int iringbuf_count = 0;
 
 static void itrace_format(char *buf, size_t bufsize, uint32_t pc, uint32_t inst)
 {
@@ -281,9 +282,17 @@ static void itrace_format(char *buf, size_t bufsize, uint32_t pc, uint32_t inst)
              pc, bytes[3], bytes[2], bytes[1], bytes[0], asmstr);
 }
 
+// Cheap: just two integer stores, safe to call every single cycle regardless of
+// whether --itrace is even enabled. The expensive part (string formatting, the
+// capstone disassembly call) is deferred to itrace_display_ring()/cmd_si below,
+// which only run when something is actually about to be shown. Recording the
+// formatted string here instead (as an earlier version did) meant a real
+// snprintf() call on every cycle even with itrace fully disabled -- measurably
+// slower on long runs like FCEUX, for a ring buffer nothing was reading yet.
 static void itrace_record(uint32_t pc, uint32_t inst)
 {
-    itrace_format(iringbuf[iringbuf_idx], sizeof(iringbuf[0]), pc, inst);
+    iringbuf[iringbuf_idx].pc   = pc;
+    iringbuf[iringbuf_idx].inst = inst;
     iringbuf_idx = (iringbuf_idx + 1) % IRINGBUF_SIZE;
     if (iringbuf_count < IRINGBUF_SIZE) iringbuf_count++;
 }
@@ -294,7 +303,9 @@ static void itrace_display_ring()
     int start = (iringbuf_idx - n + IRINGBUF_SIZE) % IRINGBUF_SIZE;
     for (int i = 0; i < n; i++) {
         int idx = (start + i) % IRINGBUF_SIZE;
-        printf("%s %s\n", (i == n - 1) ? "-->" : "   ", iringbuf[idx]);
+        char buf[256];
+        itrace_format(buf, sizeof(buf), iringbuf[idx].pc, iringbuf[idx].inst);
+        printf("%s %s\n", (i == n - 1) ? "-->" : "   ", buf);
     }
 }
 
@@ -457,7 +468,12 @@ static void cmd_si(const char *args)
     long long n = 1;
     if (args && *args) n = atoll(args);
     step_n_cycles(n);
-    if (iringbuf_count > 0) printf("%s\n", iringbuf[(iringbuf_idx - 1 + IRINGBUF_SIZE) % IRINGBUF_SIZE]);
+    if (iringbuf_count > 0) {
+        int idx = (iringbuf_idx - 1 + IRINGBUF_SIZE) % IRINGBUF_SIZE;
+        char buf[256];
+        itrace_format(buf, sizeof(buf), iringbuf[idx].pc, iringbuf[idx].inst);
+        printf("%s\n", buf);
+    }
     if (sim_finished || g_cycles >= MAX_CYCLES || difftest_mismatch) report_result();
 }
 
