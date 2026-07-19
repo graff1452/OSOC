@@ -7,7 +7,7 @@ AM_SRCS := riscv/npc/start.S \
            riscv/npc/cte.c \
            riscv/npc/trap.S \
            platform/dummy/vme.c \
-           platform/dummy/mpe.c \
+           platform/dummy/mpe.c
 
 CFLAGS    += -fdata-sections -ffunction-sections
 CFLAGS    += -I$(AM_HOME)/am/src/riscv/npc/include
@@ -27,7 +27,9 @@ image: image-dep
 	@echo + OBJCOPY "->" $(IMAGE_REL).bin
 	@$(OBJCOPY) -S --set-section-flags .bss=alloc,contents -O binary $(IMAGE).elf $(IMAGE).bin
 
+NPC_SIM ?= $(AM_HOME)/../npc/minirv-rtl/build/Vminirv
+
 run: insert-arg
-	$(AM_HOME)/../npc/minirv-rtl/build/Vminirv $(IMAGE).bin
+	$(NPC_SIM) $(IMAGE).bin
 
 .PHONY: insert-arg

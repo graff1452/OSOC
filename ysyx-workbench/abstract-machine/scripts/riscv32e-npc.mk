@@ -1,5 +1,13 @@
 include $(AM_HOME)/scripts/isa/riscv.mk
 include $(AM_HOME)/scripts/platform/npc.mk
+
+CFLAGS  += -DISA_H=\"riscv/riscv.h\"
+
+# platform/npc.mk defaults NPC_SIM to the minirv-rtl binary -- override it here so
+# riscv32e-npc uses the separate npc/riscv32e/ simulator instead, without touching
+# minirv-npc's own default at all.
+NPC_SIM := $(AM_HOME)/../npc/riscv32e/build/Vminirv
+
 COMMON_CFLAGS += -march=rv32e_zicsr -mabi=ilp32e  # overwrite
 LDFLAGS       += -melf32lriscv                    # overwrite
 
