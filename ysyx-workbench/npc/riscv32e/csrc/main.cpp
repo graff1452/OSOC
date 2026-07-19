@@ -12,6 +12,7 @@
 #include <readline/readline.h>
 #include <readline/history.h>
 #include <dlfcn.h>
+#include <capstone/capstone.h>
 
 #define PMEM_BASE 0x80000000u
 #define MEM_SIZE  (128 * 1024 * 1024)
@@ -227,6 +228,86 @@ static void (*ref_difftest_memcpy)(uint32_t addr, void *buf, size_t n, int direc
 static void (*ref_difftest_regcpy)(void *dut, int direction) = nullptr;
 static void (*ref_difftest_exec)(uint64_t n) = nullptr;
 static void (*ref_difftest_init)(int port) = nullptr;
+// ---- itrace: disassemble every retired instruction, keep a ring buffer of the
+// most recent ones for crash/mismatch context (mirrors NEMU's own iringbuf).
+// Reuses NEMU's already-built capstone library via dlopen -- the same approach
+// NEMU itself uses internally (see nemu/src/utils/disasm.c) -- rather than
+// building our own separate copy.
+static csh    cs_handle;
+static size_t (*cs_disasm_dl)(csh, const uint8_t*, size_t, uint64_t, size_t, cs_insn**) = nullptr;
+static void   (*cs_free_dl)(cs_insn*, size_t) = nullptr;
+static bool   itrace_ready = false;
+
+static void itrace_init(const char *capstone_so_path)
+{
+    void *handle = dlopen(capstone_so_path, RTLD_LAZY);
+    if (!handle) { fprintf(stderr, "dlopen('%s') failed: %s\n", capstone_so_path, dlerror()); exit(1); }
+
+    cs_err (*cs_open_dl)(cs_arch, cs_mode, csh*) = (cs_err(*)(cs_arch,cs_mode,csh*))dlsym(handle, "cs_open");
+    cs_disasm_dl = (size_t(*)(csh,const uint8_t*,size_t,uint64_t,size_t,cs_insn**))dlsym(handle, "cs_disasm");
+    cs_free_dl   = (void(*)(cs_insn*,size_t))dlsym(handle, "cs_free");
+    if (!cs_open_dl || !cs_disasm_dl || !cs_free_dl) {
+        fprintf(stderr, "dlsym failed for capstone functions: %s\n", dlerror());
+        exit(1);
+    }
+    cs_err ret = cs_open_dl(CS_ARCH_RISCV, CS_MODE_RISCV32, &cs_handle);
+    if (ret != CS_ERR_OK) { fprintf(stderr, "cs_open failed (err=%d)\n", ret); exit(1); }
+
+    itrace_ready = true;
+    printf("itrace enabled, capstone loaded from %s\n", capstone_so_path);
+}
+
+#define IRINGBUF_SIZE 16
+static char iringbuf[IRINGBUF_SIZE][256];
+static int  iringbuf_idx   = 0;
+static int  iringbuf_count = 0;
+
+static void itrace_format(char *buf, size_t bufsize, uint32_t pc, uint32_t inst)
+{
+    uint8_t bytes[4] = { (uint8_t)inst, (uint8_t)(inst >> 8), (uint8_t)(inst >> 16), (uint8_t)(inst >> 24) };
+    char asmstr[192] = "(disasm unavailable -- pass --itrace <capstone.so>)";
+    if (itrace_ready) {
+        cs_insn *insn;
+        size_t count = cs_disasm_dl(cs_handle, bytes, 4, pc, 0, &insn);
+        if (count == 1) {
+            snprintf(asmstr, sizeof(asmstr), "%s%s%s", insn->mnemonic,
+                     insn->op_str[0] ? "\t" : "", insn->op_str);
+            cs_free_dl(insn, count);
+        } else {
+            snprintf(asmstr, sizeof(asmstr), "(bad)");
+        }
+    }
+    snprintf(buf, bufsize, "0x%08x: %02x %02x %02x %02x  %s",
+             pc, bytes[3], bytes[2], bytes[1], bytes[0], asmstr);
+}
+
+static void itrace_record(uint32_t pc, uint32_t inst)
+{
+    itrace_format(iringbuf[iringbuf_idx], sizeof(iringbuf[0]), pc, inst);
+    iringbuf_idx = (iringbuf_idx + 1) % IRINGBUF_SIZE;
+    if (iringbuf_count < IRINGBUF_SIZE) iringbuf_count++;
+}
+
+static void itrace_display_ring()
+{
+    int n = iringbuf_count;
+    int start = (iringbuf_idx - n + IRINGBUF_SIZE) % IRINGBUF_SIZE;
+    for (int i = 0; i < n; i++) {
+        int idx = (start + i) % IRINGBUF_SIZE;
+        printf("%s %s\n", (i == n - 1) ? "-->" : "   ", iringbuf[idx]);
+    }
+}
+
+// ---- mtrace: log real load/store instructions only (not instruction fetch --
+// ifu.v calls pmem_read every single cycle regardless, which would flood this
+// with noise; dbg_mem_wen/ren correctly distinguish "this is a real LSU access").
+static bool g_mtrace_enabled = false;
+
+static void mtrace_log(uint32_t addr, bool is_write, uint32_t value)
+{
+    fprintf(stderr, "[mtrace] %s 0x%08x = 0x%08x\n", is_write ? "write" : "read ", addr, value);
+}
+
 static bool difftest_enabled  = false;
 static bool difftest_mismatch = false;
 static bool g_touched_device  = false;   // recomputed fresh every cycle from settled port values
@@ -327,6 +408,11 @@ static void step_n_cycles(long long n)
         // this is exactly the bug that caused false device-touch detections before.
         g_touched_device = (g_top->dbg_mem_wen || g_top->dbg_mem_ren)
                           && is_device_addr(g_top->dbg_mem_addr);
+        if (g_mtrace_enabled) {
+            if (g_top->dbg_mem_wen)      mtrace_log(g_top->dbg_mem_addr, true,  g_top->dbg_mem_wdata);
+            else if (g_top->dbg_mem_ren) mtrace_log(g_top->dbg_mem_addr, false, g_top->dbg_wdata);
+        }
+        itrace_record(g_top->pc, g_top->dbg_inst);
         g_top->clk = 1; g_top->eval(); if (g_cycles < TRACE_CYCLES) g_tfp->dump(g_time++);
         g_cycles++;
         if (difftest_enabled && !sim_finished) {
@@ -343,6 +429,8 @@ static void report_result()
     if (difftest_mismatch)
     {
         printf("DIFFTEST FAILED -- DUT and REF diverged, see mismatch above (%lld cycles)\n", g_cycles);
+        printf("Last %d instructions:\n", iringbuf_count);
+        itrace_display_ring();
     }
     else if (sim_finished) 
     {
@@ -350,11 +438,17 @@ static void report_result()
         if (a0 == 0) 
             printf("HIT GOOD TRAP -- a0 = %d, simulation ended after %lld cycles\n", a0, g_cycles);
         else 
+        {
             printf("HIT BAD TRAP -- a0 = %d, simulation ended after %lld cycles\n", a0, g_cycles);
+            printf("Last %d instructions:\n", iringbuf_count);
+            itrace_display_ring();
+        }
     } 
     else if (g_cycles >= MAX_CYCLES) 
     {
         printf("HIT BAD TRAP (timeout) -- ran %lld cycles without ebreak\n", g_cycles);
+        printf("Last %d instructions:\n", iringbuf_count);
+        itrace_display_ring();
     }
 }
 
@@ -363,6 +457,7 @@ static void cmd_si(const char *args)
     long long n = 1;
     if (args && *args) n = atoll(args);
     step_n_cycles(n);
+    if (iringbuf_count > 0) printf("%s\n", iringbuf[(iringbuf_idx - 1 + IRINGBUF_SIZE) % IRINGBUF_SIZE]);
     if (sim_finished || g_cycles >= MAX_CYCLES || difftest_mismatch) report_result();
 }
 
@@ -411,8 +506,9 @@ static void sdb_loop()
         else if (strcmp(cmd, "info") == 0 && args && strcmp(args, "r") == 0) cmd_info_r();
         else if (strcmp(cmd, "x") == 0) cmd_x(args);
         else if (strcmp(cmd, "c") == 0) cmd_c();
+        else if (strcmp(cmd, "iringbuf") == 0) itrace_display_ring();
         else if (strcmp(cmd, "q") == 0 || strcmp(cmd, "quit") == 0) { free(line); break; }
-        else printf("Unknown command '%s'. Try: si [N], info r, x N ADDR, c, q\n", cmd);
+        else printf("Unknown command '%s'. Try: si [N], info r, x N ADDR, c, iringbuf, q\n", cmd);
 
         free(line);
         if (sim_finished || g_cycles >= MAX_CYCLES || difftest_mismatch) break;
@@ -424,17 +520,21 @@ int main(int argc, char** argv)
     bool interactive = false;
     const char *image_path = nullptr;
     const char *diff_so_path = nullptr;
+    const char *capstone_so_path = nullptr;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-i") == 0) interactive = true;
         else if (strcmp(argv[i], "--diff") == 0 && i + 1 < argc) diff_so_path = argv[++i];
+        else if (strcmp(argv[i], "--itrace") == 0 && i + 1 < argc) capstone_so_path = argv[++i];
+        else if (strcmp(argv[i], "--mtrace") == 0) g_mtrace_enabled = true;
         else image_path = argv[i];
     }
     if (!image_path) 
     {
-        printf("usage: %s [-i] [--diff <ref.so>] <image.bin>\n", argv[0]);
+        printf("usage: %s [-i] [--diff <ref.so>] [--itrace <libcapstone.so>] [--mtrace] <image.bin>\n", argv[0]);
         return 1;
     }
     load_image(image_path);
+    if (capstone_so_path) itrace_init(capstone_so_path);
 
     VerilatedContext* contextp = new VerilatedContext;
     contextp->commandArgs(argc, argv);
