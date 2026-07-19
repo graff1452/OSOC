@@ -320,6 +320,246 @@ static void mtrace_log(uint32_t addr, bool is_write, uint32_t value)
     fprintf(stderr, "[mtrace] %s 0x%08x = 0x%08x\n", is_write ? "write" : "read ", addr, value);
 }
 
+// ---- expression evaluation, mirrors NEMU's own expr.c: same tokenizer-via-
+// regex approach, same recursive-descent/operator-precedence evaluator.
+#include <regex.h>
+
+static Vminirv        *g_top   = nullptr;
+static VerilatedFstC   *g_tfp   = nullptr;
+static vluint64_t       g_time  = 0;
+static long long        g_cycles = 0;
+static const long long  MAX_CYCLES   = 2000000000LL;
+static const long long  TRACE_CYCLES = 200000;   // only dump waveform for the first ~200k cycles
+
+enum { TK_NOTYPE = 256, TK_EQ, TK_NUM, TK_NEQ, TK_AND, TK_REG };
+
+struct ExprRule { const char *regex; int token_type; };
+static ExprRule expr_rules[] = {
+    {" +", TK_NOTYPE},
+    {"\\+", '+'},
+    {"-", '-'},
+    {"\\*", '*'},
+    {"/", '/'},
+    {"\\(", '('},
+    {"\\)", ')'},
+    {"[0-9]+", TK_NUM},
+    {"\\$[a-zA-Z0-9]+", TK_REG},   // e.g. $pc, $a0, $x5
+    {"==", TK_EQ},
+    {"!=", TK_NEQ},
+    {"&&", TK_AND},
+};
+#define NR_EXPR_RULES (sizeof(expr_rules) / sizeof(expr_rules[0]))
+static regex_t expr_re[NR_EXPR_RULES];
+static bool expr_regex_ready = false;
+
+static void expr_init_regex()
+{
+    for (size_t i = 0; i < NR_EXPR_RULES; i++) {
+        int ret = regcomp(&expr_re[i], expr_rules[i].regex, REG_EXTENDED);
+        if (ret != 0) {
+            char err[128];
+            regerror(ret, &expr_re[i], err, sizeof(err));
+            fprintf(stderr, "regex compile failed: %s\n", err);
+            exit(1);
+        }
+    }
+    expr_regex_ready = true;
+}
+
+struct ExprToken { int type; char str[32]; };
+static ExprToken expr_tokens[1024];
+static int expr_nr_token = 0;
+
+static bool expr_make_token(const char *e)
+{
+    if (!expr_regex_ready) expr_init_regex();
+    int position = 0;
+    expr_nr_token = 0;
+    int elen = (int)strlen(e);
+    while (position < elen) {
+        size_t i;
+        regmatch_t pmatch;
+        for (i = 0; i < NR_EXPR_RULES; i++) {
+            if (regexec(&expr_re[i], e + position, 1, &pmatch, 0) == 0 && pmatch.rm_so == 0) {
+                int substr_len = (int)pmatch.rm_eo;
+                if (expr_rules[i].token_type != TK_NOTYPE) {
+                    if (expr_nr_token >= 1024) { printf("too many tokens\n"); return false; }
+                    expr_tokens[expr_nr_token].type = expr_rules[i].token_type;
+                    int len = substr_len < 31 ? substr_len : 31;
+                    strncpy(expr_tokens[expr_nr_token].str, e + position, len);
+                    expr_tokens[expr_nr_token].str[len] = '\0';
+                    expr_nr_token++;
+                }
+                position += substr_len;
+                break;
+            }
+        }
+        if (i == NR_EXPR_RULES) {
+            printf("no match at position %d\n%s\n%*.s^\n", position, e, position, "");
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool expr_check_parens(int p, int q)
+{
+    if (expr_tokens[p].type != '(' || expr_tokens[q].type != ')') return false;
+    int balance = 0;
+    for (int i = p; i <= q; i++) {
+        if (expr_tokens[i].type == '(') balance++;
+        if (expr_tokens[i].type == ')') balance--;
+        if (balance == 0 && i != q) return false;
+    }
+    return balance == 0;
+}
+
+static int expr_op_prec(int type)
+{
+    switch (type) {
+        case TK_AND: return 0;
+        case TK_EQ: case TK_NEQ: return 1;
+        case '+': case '-': return 2;
+        case '*': case '/': return 3;
+        default: return -1;
+    }
+}
+
+// $pc, $zero/$ra/.../$a5 (ABI names, matching reg_names[]), or $x0-$x15
+static bool reg_str2val(const char *name, uint32_t *out)
+{
+    if (strcmp(name, "pc") == 0) { *out = g_top->pc; return true; }
+    for (int i = 0; i < 16; i++) {
+        if (strcmp(name, reg_names[i]) == 0) { *out = (uint32_t)get_reg_val(i); return true; }
+    }
+    if (name[0] == 'x') {
+        int idx = atoi(name + 1);
+        if (idx >= 0 && idx < 16) { *out = (uint32_t)get_reg_val(idx); return true; }
+    }
+    return false;
+}
+
+static int32_t expr_eval(int p, int q, bool *success)
+{
+    if (p > q) { printf("Bad expression\n"); *success = false; return 0; }
+    if (p == q) {
+        if (expr_tokens[p].type == TK_NUM) return (int32_t)atoi(expr_tokens[p].str);
+        if (expr_tokens[p].type == TK_REG) {
+            uint32_t val;
+            if (!reg_str2val(expr_tokens[p].str + 1, &val)) {
+                printf("Unknown register '%s'\n", expr_tokens[p].str);
+                *success = false;
+                return 0;
+            }
+            return (int32_t)val;
+        }
+        printf("Expected a number or register\n");
+        *success = false;
+        return 0;
+    }
+    if (expr_check_parens(p, q)) return expr_eval(p + 1, q - 1, success);
+
+    int op = -1, min_prec = 1000, depth = 0;
+    for (int i = p; i <= q; i++) {
+        if (expr_tokens[i].type == '(') { depth++; continue; }
+        if (expr_tokens[i].type == ')') { depth--; continue; }
+        if (depth > 0) continue;
+        int prec = expr_op_prec(expr_tokens[i].type);
+        if (prec == -1) continue;
+        if (prec <= min_prec) { min_prec = prec; op = i; }
+    }
+    if (op == -1) { printf("No operator found\n"); *success = false; return 0; }
+
+    int32_t v1 = expr_eval(p, op - 1, success);
+    if (!*success) return 0;
+    int32_t v2 = expr_eval(op + 1, q, success);
+    if (!*success) return 0;
+
+    switch (expr_tokens[op].type) {
+        case '+': return v1 + v2;
+        case '-': return v1 - v2;
+        case '*': return v1 * v2;
+        case '/':
+            if (v2 == 0) { printf("Division by zero\n"); *success = false; return 0; }
+            return v1 / v2;
+        case TK_EQ:  return v1 == v2;
+        case TK_NEQ: return v1 != v2;
+        case TK_AND: return v1 && v2;
+        default: *success = false; return 0;
+    }
+}
+
+static int32_t expr_evaluate(const char *e, bool *success)
+{
+    if (!expr_make_token(e)) { *success = false; return 0; }
+    *success = true;
+    return expr_eval(0, expr_nr_token - 1, success);
+}
+
+// ---- watchpoints, mirrors NEMU's own watchpoint.c: fixed-size pool, two
+// linked lists (active list + free list) threaded through the same array.
+#define NR_WP 32
+struct WP { int NO; char expr_str[128]; int32_t old_val; WP *next; };
+static WP wp_pool[NR_WP];
+static WP *wp_head = nullptr, *wp_free_list = nullptr;
+static bool g_wp_triggered = false;
+
+static void wp_pool_init()
+{
+    for (int i = 0; i < NR_WP; i++) {
+        wp_pool[i].NO = i;
+        wp_pool[i].next = (i == NR_WP - 1) ? nullptr : &wp_pool[i + 1];
+    }
+    wp_head = nullptr;
+    wp_free_list = wp_pool;
+}
+
+static WP* wp_new()
+{
+    if (!wp_free_list) { printf("No free watchpoints left\n"); return nullptr; }
+    WP *wp = wp_free_list;
+    wp_free_list = wp_free_list->next;
+    wp->next = wp_head;
+    wp_head = wp;
+    return wp;
+}
+
+static void wp_free_one(WP *wp)
+{
+    if (wp_head == wp) {
+        wp_head = wp_head->next;
+    } else {
+        WP *p = wp_head;
+        while (p && p->next != wp) p = p->next;
+        if (p) p->next = wp->next;
+    }
+    wp->next = wp_free_list;
+    wp_free_list = wp;
+}
+
+static WP* wp_find(int no)
+{
+    for (WP *p = wp_head; p; p = p->next) if (p->NO == no) return p;
+    return nullptr;
+}
+
+// Called once per retired instruction, mirrors NEMU's check_watchpoints():
+// re-evaluate every active watchpoint's expression, report + stop if changed.
+static void check_watchpoints()
+{
+    for (WP *p = wp_head; p; p = p->next) {
+        bool success;
+        int32_t new_val = expr_evaluate(p->expr_str, &success);
+        if (success && new_val != p->old_val) {
+            printf("Watchpoint %d: %s\n", p->NO, p->expr_str);
+            printf("Old value = %d\n", p->old_val);
+            printf("New value = %d\n", new_val);
+            p->old_val = new_val;
+            g_wp_triggered = true;
+        }
+    }
+}
+
 static bool difftest_enabled  = false;
 
 // ---- ftrace: track function calls/returns via jal/jalr, mirroring NEMU's own
@@ -437,13 +677,6 @@ static void difftest_load(const char *so_path)
     printf("DiffTest enabled, REF loaded from %s\n", so_path);
 }
 
-static Vminirv        *g_top   = nullptr;
-static VerilatedFstC   *g_tfp   = nullptr;
-static vluint64_t       g_time  = 0;
-static long long        g_cycles = 0;
-static const long long  MAX_CYCLES   = 2000000000LL;
-static const long long  TRACE_CYCLES = 200000;   // only dump waveform for the first ~200k cycles
-
 // Called once per real instruction retired (this core is single-cycle: one
 // instruction per clock cycle, so once per step_n_cycles loop iteration).
 static bool is_device_addr(uint32_t addr)
@@ -496,7 +729,7 @@ static void difftest_check_one_instruction()
 
 static void step_n_cycles(long long n)
 {
-    for (long long i = 0; i < n && !sim_finished && g_cycles < MAX_CYCLES && !difftest_mismatch; i++)
+    for (long long i = 0; i < n && !sim_finished && g_cycles < MAX_CYCLES && !difftest_mismatch && !g_wp_triggered; i++)
     {
         g_top->clk = 0; g_top->eval(); if (g_cycles < TRACE_CYCLES) g_tfp->dump(g_time++);
         // Sample here, between the edges: pc/inst/dbg_mem_* still combinationally
@@ -531,6 +764,7 @@ static void step_n_cycles(long long n)
         if (difftest_enabled && !sim_finished) {
             difftest_check_one_instruction();
         }
+        if (!sim_finished) check_watchpoints();
         if (g_cycles % 10000000 == 0) {
             fprintf(stderr, "... %lld cycles simulated\n", g_cycles);
         }
@@ -544,6 +778,10 @@ static void report_result()
         printf("DIFFTEST FAILED -- DUT and REF diverged, see mismatch above (%lld cycles)\n", g_cycles);
         printf("Last %d instructions:\n", iringbuf_count);
         itrace_display_ring();
+    }
+    else if (g_wp_triggered)
+    {
+        printf("Stopped at watchpoint, %lld cycles\n", g_cycles);
     }
     else if (sim_finished) 
     {
@@ -567,6 +805,7 @@ static void report_result()
 
 static void cmd_si(const char *args)
 {
+    g_wp_triggered = false;   // a previous watchpoint stop shouldn't block further stepping
     long long n = 1;
     if (args && *args) n = atoll(args);
     step_n_cycles(n);
@@ -576,7 +815,7 @@ static void cmd_si(const char *args)
         itrace_format(buf, sizeof(buf), iringbuf[idx].pc, iringbuf[idx].inst);
         printf("%s\n", buf);
     }
-    if (sim_finished || g_cycles >= MAX_CYCLES || difftest_mismatch) report_result();
+    if (sim_finished || g_cycles >= MAX_CYCLES || difftest_mismatch || g_wp_triggered) report_result();
 }
 
 static void cmd_info_r()
@@ -606,8 +845,49 @@ static void cmd_x(const char *args)
 
 static void cmd_c()
 {
+    g_wp_triggered = false;   // a previous watchpoint stop shouldn't block continuing
     step_n_cycles(MAX_CYCLES - g_cycles);
     report_result();
+}
+
+static void cmd_w(const char *args)
+{
+    if (!args || !*args) { printf("Usage: w EXPR\n"); return; }
+    bool success;
+    int32_t val = expr_evaluate(args, &success);
+    if (!success) { printf("Bad expression\n"); return; }
+    WP *wp = wp_new();
+    if (!wp) return;
+    strncpy(wp->expr_str, args, sizeof(wp->expr_str) - 1);
+    wp->expr_str[sizeof(wp->expr_str) - 1] = 0;
+    wp->old_val = val;
+    printf("Watchpoint %d: %s\n", wp->NO, wp->expr_str);
+}
+
+static void cmd_d(const char *args)
+{
+    if (!args || !*args) { printf("Usage: d N\n"); return; }
+    int no = atoi(args);
+    WP *wp = wp_find(no);
+    if (!wp) { printf("No watchpoint number %d\n", no); return; }
+    wp_free_one(wp);
+    printf("Deleted watchpoint %d\n", no);
+}
+
+static void cmd_info_w()
+{
+    if (!wp_head) { printf("No watchpoints.\n"); return; }
+    printf("Num  What\n");
+    for (WP *p = wp_head; p; p = p->next) printf("%-4d %s\n", p->NO, p->expr_str);
+}
+
+static void cmd_p(const char *args)
+{
+    if (!args || !*args) { printf("Usage: p EXPR\n"); return; }
+    bool success;
+    int32_t val = expr_evaluate(args, &success);
+    if (!success) { printf("Bad expression\n"); return; }
+    printf("%d (0x%08x)\n", val, (uint32_t)val);
 }
 
 static void sdb_loop()
@@ -622,11 +902,15 @@ static void sdb_loop()
 
         if      (strcmp(cmd, "si") == 0) cmd_si(args);
         else if (strcmp(cmd, "info") == 0 && args && strcmp(args, "r") == 0) cmd_info_r();
+        else if (strcmp(cmd, "info") == 0 && args && strcmp(args, "w") == 0) cmd_info_w();
         else if (strcmp(cmd, "x") == 0) cmd_x(args);
         else if (strcmp(cmd, "c") == 0) cmd_c();
         else if (strcmp(cmd, "iringbuf") == 0) itrace_display_ring();
+        else if (strcmp(cmd, "w") == 0) cmd_w(args);
+        else if (strcmp(cmd, "d") == 0) cmd_d(args);
+        else if (strcmp(cmd, "p") == 0) cmd_p(args);
         else if (strcmp(cmd, "q") == 0 || strcmp(cmd, "quit") == 0) { free(line); break; }
-        else printf("Unknown command '%s'. Try: si [N], info r, x N ADDR, c, iringbuf, q\n", cmd);
+        else printf("Unknown command '%s'. Try: si [N], info r, info w, x N ADDR, c, iringbuf, w EXPR, d N, p EXPR, q\n", cmd);
 
         free(line);
         if (sim_finished || g_cycles >= MAX_CYCLES || difftest_mismatch) break;
@@ -686,6 +970,7 @@ int main(int argc, char** argv)
     if (diff_so_path) {
         difftest_load(diff_so_path);
     }
+    wp_pool_init();
 
     if (interactive) 
     {
