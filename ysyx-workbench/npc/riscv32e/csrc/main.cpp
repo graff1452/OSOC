@@ -89,7 +89,7 @@ static void init_vga_if_needed()
 {
     if (vga_window) return;   // already initialized -- only open the window once
     SDL_Init(SDL_INIT_VIDEO);
-    SDL_CreateWindowAndRenderer(SCREEN_W*4, SCREEN_H*4, 0, &vga_window, &vga_renderer);
+    SDL_CreateWindowAndRenderer(SCREEN_W*3, SCREEN_H*3, 0, &vga_window, &vga_renderer);
     SDL_SetWindowTitle(vga_window, "minirv-npc");
     vga_texture = SDL_CreateTexture(vga_renderer, SDL_PIXELFORMAT_ARGB8888,
                                      SDL_TEXTUREACCESS_STATIC, SCREEN_W, SCREEN_H);
@@ -365,3 +365,4 @@ int main(int argc, char** argv)
     delete g_top;
     return 0;
 }
+
