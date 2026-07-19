@@ -13,6 +13,7 @@
 #include <readline/history.h>
 #include <dlfcn.h>
 #include <capstone/capstone.h>
+#include <elf.h>
 
 #define PMEM_BASE 0x80000000u
 #define MEM_SIZE  (128 * 1024 * 1024)
@@ -320,6 +321,93 @@ static void mtrace_log(uint32_t addr, bool is_write, uint32_t value)
 }
 
 static bool difftest_enabled  = false;
+
+// ---- ftrace: track function calls/returns via jal/jalr, mirroring NEMU's own
+// ftrace.c: same ELF symbol table parsing, same indent-by-call-depth display.
+#define MAX_FUNCS 512
+struct FuncSym { uint32_t addr; uint32_t size; char name[64]; };
+static FuncSym g_funcs[MAX_FUNCS];
+static int  g_nr_funcs     = 0;
+static int  g_ftrace_depth = 0;
+static bool g_ftrace_enabled = false;
+
+static void ftrace_init(const char *elf_path)
+{
+    FILE *fp = fopen(elf_path, "rb");
+    if (!fp) { fprintf(stderr, "ftrace: could not open '%s'\n", elf_path); exit(1); }
+
+    Elf32_Ehdr ehdr;
+    if (fread(&ehdr, sizeof(ehdr), 1, fp) != 1) { fprintf(stderr, "ftrace: bad ELF header\n"); exit(1); }
+
+    Elf32_Shdr *shdrs = (Elf32_Shdr*)malloc(sizeof(Elf32_Shdr) * ehdr.e_shnum);
+    fseek(fp, ehdr.e_shoff, SEEK_SET);
+    if (fread(shdrs, sizeof(Elf32_Shdr), ehdr.e_shnum, fp) != (size_t)ehdr.e_shnum) {
+        fprintf(stderr, "ftrace: could not read section headers\n"); exit(1);
+    }
+
+    Elf32_Shdr *shstrtab_hdr = &shdrs[ehdr.e_shstrndx];
+    char *shstrtab = (char*)malloc(shstrtab_hdr->sh_size);
+    fseek(fp, shstrtab_hdr->sh_offset, SEEK_SET);
+    if (fread(shstrtab, shstrtab_hdr->sh_size, 1, fp) != 1) { fprintf(stderr, "ftrace: read error\n"); exit(1); }
+
+    Elf32_Shdr *symtab_hdr = nullptr, *strtab_hdr = nullptr;
+    for (int i = 0; i < ehdr.e_shnum; i++) {
+        char *name = shstrtab + shdrs[i].sh_name;
+        if (strcmp(name, ".symtab") == 0) symtab_hdr = &shdrs[i];
+        if (strcmp(name, ".strtab") == 0) strtab_hdr = &shdrs[i];
+    }
+    if (!symtab_hdr || !strtab_hdr) {
+        fprintf(stderr, "ftrace: '%s' has no symbol table (was it stripped?)\n", elf_path);
+        exit(1);
+    }
+
+    char *strtab = (char*)malloc(strtab_hdr->sh_size);
+    fseek(fp, strtab_hdr->sh_offset, SEEK_SET);
+    if (fread(strtab, strtab_hdr->sh_size, 1, fp) != 1) { fprintf(stderr, "ftrace: read error\n"); exit(1); }
+
+    int nr_syms = symtab_hdr->sh_size / sizeof(Elf32_Sym);
+    Elf32_Sym *syms = (Elf32_Sym*)malloc(symtab_hdr->sh_size);
+    fseek(fp, symtab_hdr->sh_offset, SEEK_SET);
+    if (fread(syms, symtab_hdr->sh_size, 1, fp) != 1) { fprintf(stderr, "ftrace: read error\n"); exit(1); }
+
+    for (int i = 0; i < nr_syms && g_nr_funcs < MAX_FUNCS; i++) {
+        if (ELF32_ST_TYPE(syms[i].st_info) == STT_FUNC && syms[i].st_size > 0) {
+            g_funcs[g_nr_funcs].addr = syms[i].st_value;
+            g_funcs[g_nr_funcs].size = syms[i].st_size;
+            snprintf(g_funcs[g_nr_funcs].name, sizeof(g_funcs[g_nr_funcs].name), "%s", strtab + syms[i].st_name);
+            g_nr_funcs++;
+        }
+    }
+
+    free(shstrtab); free(strtab); free(syms); free(shdrs);
+    fclose(fp);
+    g_ftrace_enabled = true;
+    printf("ftrace enabled, loaded %d function symbols from %s\n", g_nr_funcs, elf_path);
+}
+
+static const char *addr_to_func(uint32_t addr)
+{
+    for (int i = 0; i < g_nr_funcs; i++) {
+        if (addr >= g_funcs[i].addr && addr < g_funcs[i].addr + g_funcs[i].size) return g_funcs[i].name;
+    }
+    return "???";
+}
+
+static void ftrace_call(uint32_t pc, uint32_t target)
+{
+    printf("0x%08x:", pc);
+    for (int i = 0; i < g_ftrace_depth; i++) printf("  ");
+    printf("call [%s@0x%08x]\n", addr_to_func(target), target);
+    g_ftrace_depth++;
+}
+
+static void ftrace_ret(uint32_t pc)
+{
+    if (g_ftrace_depth > 0) g_ftrace_depth--;
+    printf("0x%08x:", pc);
+    for (int i = 0; i < g_ftrace_depth; i++) printf("  ");
+    printf("ret  [%s]\n", addr_to_func(pc));
+}
 static bool difftest_mismatch = false;
 static bool g_touched_device  = false;   // recomputed fresh every cycle from settled port values
 
@@ -424,8 +512,22 @@ static void step_n_cycles(long long n)
             else if (g_top->dbg_mem_ren) mtrace_log(g_top->dbg_mem_addr, false, g_top->dbg_wdata);
         }
         itrace_record(g_top->pc, g_top->dbg_inst);
+        uint32_t ftrace_site_pc = g_top->pc;      // this instruction's own address
+        uint32_t ftrace_inst    = g_top->dbg_inst; // this instruction's raw bits
         g_top->clk = 1; g_top->eval(); if (g_cycles < TRACE_CYCLES) g_tfp->dump(g_time++);
         g_cycles++;
+        if (g_ftrace_enabled) {
+            uint32_t opcode = ftrace_inst & 0x7f;
+            uint32_t rd     = (ftrace_inst >> 7)  & 0x1f;
+            uint32_t rs1    = (ftrace_inst >> 15) & 0x1f;
+            uint32_t target = g_top->pc;   // pc has now advanced -- this IS the destination
+            if (opcode == 0x6f) {                // jal
+                if (rd != 0) ftrace_call(ftrace_site_pc, target);
+            } else if (opcode == 0x67) {         // jalr
+                if (rd == 0 && rs1 == 1) ftrace_ret(ftrace_site_pc);
+                else if (rd != 0) ftrace_call(ftrace_site_pc, target);
+            }
+        }
         if (difftest_enabled && !sim_finished) {
             difftest_check_one_instruction();
         }
@@ -537,20 +639,23 @@ int main(int argc, char** argv)
     const char *image_path = nullptr;
     const char *diff_so_path = nullptr;
     const char *capstone_so_path = nullptr;
+    const char *ftrace_elf_path = nullptr;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-i") == 0) interactive = true;
         else if (strcmp(argv[i], "--diff") == 0 && i + 1 < argc) diff_so_path = argv[++i];
         else if (strcmp(argv[i], "--itrace") == 0 && i + 1 < argc) capstone_so_path = argv[++i];
         else if (strcmp(argv[i], "--mtrace") == 0) g_mtrace_enabled = true;
+        else if (strcmp(argv[i], "--ftrace") == 0 && i + 1 < argc) ftrace_elf_path = argv[++i];
         else image_path = argv[i];
     }
     if (!image_path) 
     {
-        printf("usage: %s [-i] [--diff <ref.so>] [--itrace <libcapstone.so>] [--mtrace] <image.bin>\n", argv[0]);
+        printf("usage: %s [-i] [--diff <ref.so>] [--itrace <libcapstone.so>] [--mtrace] [--ftrace <image.elf>] <image.bin>\n", argv[0]);
         return 1;
     }
     load_image(image_path);
     if (capstone_so_path) itrace_init(capstone_so_path);
+    if (ftrace_elf_path)  ftrace_init(ftrace_elf_path);
 
     VerilatedContext* contextp = new VerilatedContext;
     contextp->commandArgs(argc, argv);
