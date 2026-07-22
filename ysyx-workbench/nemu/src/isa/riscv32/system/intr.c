@@ -14,13 +14,19 @@
 ***************************************************************************************/
 
 #include <isa.h>
+#include <cpu/cpu.h>
 
 word_t isa_raise_intr(word_t NO, vaddr_t epc) {
   /* TODO: Trigger an interrupt/exception with ``NO''.
    * Then return the address of the interrupt/exception vector.
    */
-
-  return 0;
+  cpu.mepc = epc;
+  cpu.mcause = NO;
+#ifdef CONFIG_ETRACE
+  log_write("etrace: cause = %u, epc = " FMT_WORD ", target = " FMT_WORD "\n",
+            NO, epc, cpu.mtvec);
+#endif
+  return cpu.mtvec;
 }
 
 word_t isa_query_intr() {

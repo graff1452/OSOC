@@ -23,7 +23,7 @@
 #define Mw vaddr_write
 
 enum {
-  TYPE_I, TYPE_U, TYPE_S, TYPE_J, TYPE_R, TYPE_B,
+  TYPE_I, TYPE_U, TYPE_S, TYPE_J, TYPE_R, TYPE_B, TYPE_CSR,
   TYPE_N, // none
 };
 
@@ -36,6 +36,7 @@ enum {
                                  (BITS(i, 20, 20) << 11) | (BITS(i, 30, 21) << 1), 21); } while(0)
 #define immB() do { *imm = SEXT((BITS(i, 31, 31) << 12) | (BITS(i, 7, 7) << 11) | \
                                  (BITS(i, 30, 25) << 5) | (BITS(i, 11, 8) << 1), 13); } while(0)
+#define immCSR() do { *imm = BITS(i, 31, 20); } while(0)
 
 static void decode_operand(Decode *s, int *rd, word_t *src1, word_t *src2, word_t *imm, int type) {
   uint32_t i = s->isa.inst;
@@ -50,6 +51,7 @@ static void decode_operand(Decode *s, int *rd, word_t *src1, word_t *src2, word_
     case TYPE_N: break;
     case TYPE_R: src1R(); src2R(); break;
     case TYPE_B: src1R(); src2R(); immB(); break;
+    case TYPE_CSR: src1R(); immCSR(); break;
     default: panic("unsupported type = %d", type);
   }
 }
@@ -114,6 +116,36 @@ static int decode_exec(Decode *s) {
   INSTPAT("??????? ????? ????? 010 ????? 01000 11", sw     , S, Mw(src1 + imm, 4, src2));
   INSTPAT("??????? ????? ????? 001 ????? 01000 11", sh     , S, Mw(src1 + imm, 2, src2));
   INSTPAT("??????? ????? ????? ??? ????? 11011 11", jal    , J, R(rd) = s->pc + 4; s->dnpc = s->pc + imm);
+
+  INSTPAT("0000000 00000 00000 000 00000 11100 11", ecall  , N, s->dnpc = isa_raise_intr(11, s->pc));
+  INSTPAT("0011000 00010 00000 000 00000 11100 11", mret   , N, s->dnpc = cpu.mepc);
+  INSTPAT("??????? ????? ????? 001 ????? 11100 11", csrrw  , CSR, {
+  word_t *pcsr;
+  switch (imm) 
+  {
+    case 0x300: pcsr = &cpu.mstatus; break;
+    case 0x305: pcsr = &cpu.mtvec;   break;
+    case 0x341: pcsr = &cpu.mepc;    break;
+    case 0x342: pcsr = &cpu.mcause;  break;
+    default: panic("csrrw: unsupported CSR address = 0x%x", imm);
+  }
+  word_t old = *pcsr;
+  *pcsr = src1;
+  R(rd) = old;
+  });
+  INSTPAT("??????? ????? ????? 010 ????? 11100 11", csrrs  , CSR, {
+  word_t *pcsr;
+  switch (imm) {
+    case 0x300: pcsr = &cpu.mstatus; break;
+    case 0x305: pcsr = &cpu.mtvec;   break;
+    case 0x341: pcsr = &cpu.mepc;    break;
+    case 0x342: pcsr = &cpu.mcause;  break;
+    default: panic("csrrs: unsupported CSR address = 0x%x", imm);
+  }
+  word_t old = *pcsr;
+  *pcsr = old | src1;
+  R(rd) = old;
+  });
 
   INSTPAT("0000000 00001 00000 000 00000 11100 11", ebreak , N, NEMUTRAP(s->pc, R(10))); // R(10) is $a0
   INSTPAT("??????? ????? ????? ??? ????? ????? ??", inv    , N, INV(s->pc));
