@@ -1,11 +1,7 @@
 *.*
 *
 !*/
-!/nemu/*
-!/nexus-am/*
-!/nanos-lite/*
-!/navy-apps/*
-!/npc/*
+!/ysyx-workbench/**
 !Makefile
 !README.md
 !.gitignore
