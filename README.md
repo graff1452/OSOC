@@ -55,10 +55,27 @@ course). Each piece below builds on the last:
   independently-written, trusted RISC-V simulator (Spike) side by side, comparing
   their results after every single instruction. Catches subtle bugs that the test
   programs above don't happen to exercise.
-- **Trace tools** (`iringbuf`, `mtrace`, `ftrace`) — different ways of recording
-  *what actually happened* while a program ran, for debugging: recent instruction
-  history, every memory read/write, or a readable function-call tree. None of these
-  change NEMU's behavior — they're just windows into what it's already doing.
+- **Trace tools** (`iringbuf`, `mtrace`, `ftrace`, `etrace`) — different ways of
+  recording *what actually happened* while a program ran, for debugging: recent
+  instruction history, every memory read/write, a readable function-call tree, or
+  every trap/exception NEMU handles. None of these change NEMU's behavior — they're
+  just windows into what it's already doing.
+- **CTE (ConText Extension) / traps** — up through PA2, NEMU only ever ran *one*
+  program, start to finish. A trap instruction (`ecall`) is how a program can
+  deliberately hand control to something else — "the operating system" — at one
+  fixed, hardware-agreed-upon address, saving its own state first so it can be
+  resumed later. This is the actual mechanism a real OS uses to intervene when a
+  program calls a library function, hits an error, or voluntarily yields the CPU.
+- **Nanos-lite** — a small (~1000-line) operating system that runs *inside* NEMU,
+  using CTE to load, run, and switch between multiple programs at once
+  (multiprogramming) instead of running one program to completion before starting
+  the next — the same trick real OSes use to keep a CPU busy while one program is
+  waiting on something slow (disk, keyboard, screen).
+- **Navy** (`navy-apps`) — real, standalone user programs that run *on top of*
+  Nanos-lite, including a full port of *The Legend of Sword and Fairy* (`pal`) —
+  compiled as an actual ELF binary, loaded from a ramdisk image, and executed
+  exactly the way a real OS would load a real program, not a function baked
+  directly into the kernel.
 
 The rest of this README (F6, E-phase, NPC) covers earlier/parallel stages of the same
 course, described in their own sections below.
@@ -585,6 +602,129 @@ duplication puzzle across `common.h`/`debug.h` (tentative-definition merging is 
 key insight — uninitialized `static` redeclarations merge silently, initialized ones
 don't); and tracing `hello/`'s `Makefile`/build pipeline via `make -n`.
 
+**PA3.1 (complete) — trap/exception handling (CTE):**
+
+Gave NEMU (and its AM-side counterpart, `abstract-machine/am/src/riscv/nemu/`) the
+ability to trap from a running program into "the operating system" at one fixed
+address — the actual mechanism a real OS uses to intervene in a program's execution
+(system calls, faults, or a program voluntarily giving up the CPU).
+
+- `nemu/src/isa/riscv32/include/isa-def.h` — added the four CSRs PA3 needs
+  (`mstatus`, `mtvec`, `mepc`, `mcause`) to `CPU_state`; nothing existed to store
+  them in beforehand.
+- `nemu/src/isa/riscv32/inst.c` — added `ecall` (the trap instruction itself),
+  `mret` (return-from-trap), and the CSR-access instructions `csrrw`/`csrrs`
+  (the latter found the hard way: `trap.S`'s `csrr` pseudo-instruction expands to
+  `csrrs`, not `csrrw` — missing it crashed with an `invalid opcode` the moment
+  `trap.S` tried to read `mcause` back out, right after `csrrw` alone had seemed
+  sufficient).
+- `nemu/src/isa/riscv32/system/intr.c` — `isa_raise_intr()` was a stub; implemented
+  the actual hardware trap response (save PC to `mepc`, save the cause to `mcause`,
+  return the target address from `mtvec`) — the literal `raise_intr` hypothetical
+  instruction from the PA3 lecture notes, made real.
+- `abstract-machine/am/include/arch/riscv.h` — the `Context` struct had a `// TODO:
+  fix the order of these members to match trap.S` sitting in it; fixed by reading
+  `trap.S`'s actual save order (`gpr[NR_REGS], mcause, mstatus, mepc`) rather than
+  guessing.
+- `abstract-machine/am/src/riscv/nemu/cte.c` — `__am_irq_handle()` only had a
+  `default: EVENT_ERROR` case; added recognition of `mcause == 11` (RISC-V's
+  spec-defined "environment call from M-mode" code) as `EVENT_YIELD`.
+- `etrace` (new `Kconfig` option + a `log_write()` call inside `isa_raise_intr()`)
+  — logs every trap NEMU handles (cause, faulting PC, target address),
+  independent of whatever the AM-side handler code does with it.
+
+**Verified:** `am-kernels/kernels/yield-os`'s `yield test` produces a continuous
+stream of `y` characters — proof the full round trip works (`yield()` → `ecall` →
+`isa_raise_intr()` → `trap.S` builds a `Context` → `__am_irq_handle()` correctly
+tags it `EVENT_YIELD` → the test's handler prints `y` → context restored → `mret`
+→ back to the loop) — plus `etrace` independently confirming hundreds of thousands
+of clean `cause = 11` trap/return cycles in a few seconds.
+
+### `nanos-lite/` and `navy-apps/` — PA4.1: Multiprogramming
+
+PA3 only ever ran one program at a time. PA4.1's goal: run *several* programs at
+once, switching between them cooperatively — the same "context switch = swap which
+saved stack you restore from" trick used by real OSes, built directly on top of
+PA3's trap mechanism rather than needing anything new at the hardware level.
+
+**Kernel threads (`nanos-lite/src/proc.c`):**
+- `kcontext()` (CTE) — hand-builds a fake "already trapped" `Context` on a fresh
+  stack, so a brand-new thread can be "resumed" into existence the first time,
+  identically to how a real trap-and-restore works. Its entry point and one `void*`
+  argument (placed directly in `a0`/`gpr[10]`, per the RISC-V calling convention)
+  get baked into that fake context.
+- `abstract-machine/am/src/riscv/nemu/trap.S` — one added line (`mv sp, a0` right
+  after `__am_irq_handle()` returns) is the entire "switch instead of restore"
+  mechanism: if the handler hands back a *different* process's saved context
+  instead of the one that trapped, everything downstream restores from that
+  process's stack instead.
+- `context_kload()` + `schedule()` — Nanos-lite's own thin wrappers: create a
+  kernel thread via `kcontext()`, remember where its context lives in its PCB, and
+  alternate between PCBs on every `EVENT_YIELD`.
+
+**Real user processes — `pal` (Legend of Sword and Fairy), running for real:**
+- `ucontext()` (`abstract-machine/am/src/riscv/nemu/vme.c`) — same fake-context
+  trick as `kcontext()`, for a process with no `arg` and (at this stage) no real
+  address-space isolation yet.
+- `loader()` (`nanos-lite/src/loader.c`, previously an unimplemented `TODO()`) —
+  a real ELF loader: reads the ELF header, walks the program-header table, copies
+  every `PT_LOAD` segment to its `p_vaddr`, zero-fills the BSS tail
+  (`p_memsz > p_filesz`), and returns `e_entry`. Backed by two new minimal
+  functions in `fs.c` (`fs_filesz`/`fs_read`) that look a file up by name in the
+  ramdisk's file table — deliberately narrow, no open-file-descriptor layer, since
+  that belongs to a later stage (`execve`/Busybox).
+- `context_uload()` — wraps `loader()` + `ucontext()` into "load this file, get a
+  runnable process."
+- Brought in `navy-apps` (Navy: user-space library + apps) via `bash init.sh
+  navy-apps` to get real `pal`/`hello` binaries and a real ramdisk image to load
+  them from (`make ISA=riscv32 ramdisk`, then `nanos-lite`'s own `make ... update`
+  symlinks `files.h`/`ramdisk.img`/`syscall.h` in).
+
+**Real bugs found and fixed getting `pal` to actually run** (this is the genuinely
+interesting part — none of these were obvious from the error messages alone):
+- Several files in Navy's vendored `libc` (newlib) call functions like `_seekdir`/
+  `_times`/`_mkdir` whose prototypes exist but are gated behind
+  `#ifdef _COMPILING_NEWLIB` — a macro Navy's own build never defines. Fixed with
+  one `-D_COMPILING_NEWLIB` added to `libs/libc/Makefile`'s `CFLAGS`, after
+  confirming (via `grep -rl`) it affected 12 files, not just 1–2 worth hand-patching.
+- A handful of files (`posix_spawn.c`, `*stat64*`/`*lseek64*`/`open64*`,
+  `wcstold.c`/`strtold.c`, `getpass.c`) are genuinely inapplicable to a bare-metal
+  target with no process model, no large-file support, and no real tty — excluded
+  from the build via `$(filter-out ...)` in `libs/libc/Makefile` rather than
+  patched to compile.
+- `pal`'s own `PAL_LoadConfig()` (in the upstream `pal-navy` source) has an
+  unguarded `strdup(gConfig.pszGamePath)` one line after a sibling call that
+  *should* have already guaranteed `pszGamePath` non-null — but doesn't, on every
+  code path. Traced from a `check_bound`/null-pointer crash through raw NEMU
+  register dumps → `riscv64-linux-gnu-addr2line`/`objdump` against `pal`'s own
+  (separate) ELF → the exact unguarded line. Patched with the same
+  null-coalescing fallback its siblings already use.
+- **The actual root cause of both crashes above turned out to be one thing:**
+  `libs/libos/src/syscall.c`'s `_sbrk()` was a bare stub always returning
+  `(void*)-1` ("failure," by `sbrk` convention) — meaning every single call to
+  newlib's real `malloc()` (which `pal` uses, *not* klib's simple bump allocator —
+  a wrong assumption that cost real debugging time before `nm`/`objdump` confirmed
+  which allocator was actually linked in) silently returned `NULL`. Implemented a
+  real `_sbrk()` — a simple, single-direction break pointer over a fixed
+  15MB region (`0x87000000`–`0x87f00000`) reserved for this stage, since there's
+  no real per-process address-space isolation yet (that's a later PA4 stage).
+  Along the way, also found and fixed a duplicate/colliding global `heap` symbol
+  (one empty definition in `libam`'s `trm.cpp`, one newly-initialized one in
+  `libos`'s `crt0.c`) that silently let the linker pick the wrong one.
+- `nanos-lite/include/common.h` had both `HAS_CTE` and `MULTIPROGRAM` sitting
+  commented-out — the same "the feature is fully coded but the switch was never
+  flipped" pattern as `HAS_NAVY`. `MULTIPROGRAM_YIELD()` (a macro that calls
+  `yield()` inside `serial_write()`/`events_read()`/`fb_write()`, simulating slow
+  device I/O so other processes get scheduled) already existed in `device.c` but
+  was never actually invoked from any of the three functions until wired in.
+
+**Verified:** `pal` runs for millions of real instructions with no crash (past
+every prior null-pointer failure point), correctly alternates with a kernel
+thread (`hello_fun`) via real `EVENT_YIELD` traps triggered from inside `pal`'s
+own device I/O calls — confirmed by decoding raw UART writes back into the actual
+interleaved `Hello World...`/game-startup text, not just inferring it from
+instruction counts.
+
 ### Related repos (not included here)
 
 Not everything lives inside this repo. A few pieces grew big enough that I split them
@@ -602,9 +742,16 @@ inside this repo's own git history, no separate cloning needed):
   timing/power analysis (iEDA) pipeline, used to turn `npc/` RTL into a real
   standard-cell netlist and get a first PPA (performance/power/area) estimate
 
+`nanos-lite/` and `navy-apps/` are **not** on this list — unlike the four above,
+they're tracked directly inside this repo's own git history, the same way
+`abstract-machine/` and `npc/` are (`init.sh nanos-lite`/`init.sh navy-apps` clone
+them with `trace=true`, which folds the sub-repo's history into this one and
+deletes its own `.git`). A fresh clone of `OSOC` brings both along automatically —
+no extra `git clone` step needed for these two.
+
 Why this matters for setup: cloning *this* repo alone is not enough to get a fully
-working checkout — these four also need cloning separately. The next section covers
-exactly when and how.
+working checkout — the four repos above also need cloning separately. The next
+section covers exactly when and how.
 
 ### Setting up a new machine
 
