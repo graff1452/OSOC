@@ -725,6 +725,13 @@ own device I/O calls — confirmed by decoding raw UART writes back into the act
 interleaved `Hello World...`/game-startup text, not just inferring it from
 instruction counts.
 
+**Two of the fixes above live in vendored, gitignored code (`libs/libc/`,
+`apps/pal/repo/` — cloned fresh from their own upstream repos on first build, not
+tracked here).** A fresh clone therefore does *not* carry them — see
+[`apply-navy-fixes.sh`](ysyx-workbench/apply-navy-fixes.sh) and step 4 of
+["Picking up my own work on a new device"](#picking-up-my-own-work-on-a-new-device)
+below for how to reapply them on a new machine.
+
 ### Related repos (not included here)
 
 Not everything lives inside this repo. A few pieces grew big enough that I split them
@@ -747,7 +754,8 @@ they're tracked directly inside this repo's own git history, the same way
 `abstract-machine/` and `npc/` are (`init.sh nanos-lite`/`init.sh navy-apps` clone
 them with `trace=true`, which folds the sub-repo's history into this one and
 deletes its own `.git`). A fresh clone of `OSOC` brings both along automatically —
-no extra `git clone` step needed for these two.
+no extra `git clone` step needed for these two. Two small pieces of `navy-apps`
+*content* still need a manual step on a new machine, though — see step 4 below.
 
 Why this matters for setup: cloning *this* repo alone is not enough to get a fully
 working checkout — the four repos above also need cloning separately. The next
@@ -823,13 +831,47 @@ git clone git@github.com:graff1452/fceux-am.git
 git clone git@github.com:graff1452/nvboard.git
 ```
 
-**4. Install NVBoard's dependencies, and tell the shell where to find it:**
+**4. `nanos-lite/` and `navy-apps/` came along with step 2** — no separate clone
+needed (see the note in "Related repos" above for why). Two things still need doing
+by hand on a new machine, though, since they involve content git never tracks:
+
+Build something in `navy-apps` once, to trigger its vendored dependencies'
+first-time clone (a bare `libc`/`pal-navy` checkout, with none of the fixes below
+applied yet):
+```bash
+cd OSOC/ysyx-workbench
+echo "export NAVY_HOME=$(readlink -f navy-apps)" >> ~/.bashrc
+source ~/.bashrc
+cd navy-apps
+make ISA=riscv32 -C apps/pal
+```
+Then apply the two hand-written fixes (`libs/libc/Makefile`'s `_COMPILING_NEWLIB`
+define + excluded-file list, and `pal-navy`'s `palcfg.c` null-pointer guard — both
+documented in the PA4.1 section above) and rebuild:
+```bash
+bash apply-navy-fixes.sh
+make ISA=riscv32 -C apps/pal
+```
+**Expect:** the second build ends in `+ LD -> build/pal-riscv32` with no
+`implicit declaration`/`fatal error` messages. If `apply-navy-fixes.sh` says
+"already patched, skipping" for both files, nothing needs redoing — it's
+idempotent, safe to run again if you're ever unsure whether it already ran.
+
+Finally, generate the actual ramdisk Nanos-lite loads `pal`/`hello` from, and point
+Nanos-lite at it:
+```bash
+make ISA=riscv32 ramdisk
+cd ../nanos-lite
+make ARCH=riscv32-nemu update
+```
+
+**5. Install NVBoard's dependencies, and tell the shell where to find it:**
 ```bash
 sudo apt-get install libsdl2-dev libsdl2-image-dev libsdl2-ttf-dev
 echo "export NVBOARD_HOME=$(readlink -f nvboard)" >> ~/.bashrc
 ```
 
-**5. Point at `abstract-machine/` — no separate download needed here.** Unlike the
+**6. Point at `abstract-machine/` — no separate download needed here.** Unlike the
 three repos above, `abstract-machine/` is tracked directly inside `OSOC` itself, so
 step 2 already brought it along:
 ```bash
@@ -837,7 +879,7 @@ echo "export AM_HOME=$(readlink -f abstract-machine)" >> ~/.bashrc
 source ~/.bashrc
 ```
 
-**6. Install Verilator v5.008 from source.** The version Ubuntu's package manager
+**7. Install Verilator v5.008 from source.** The version Ubuntu's package manager
 offers is too old for what `npc/` needs, so this has to be built by hand, outside the
 repo (see [the official install guide](https://verilator.org/guide/latest/install.html)
 for more detail than fits here):
@@ -852,14 +894,14 @@ autoconf && ./configure && make -j$(nproc) && sudo make install
 verilator --version   # should report "Verilator 5.008"
 ```
 
-**7. Point at `npc/`:**
+**8. Point at `npc/`:**
 ```bash
 cd ~/Desktop/OSOC/ysyx-workbench
 bash init.sh npc
 source ~/.bashrc
 ```
 
-**8. Set up `yosys-sta`** (synthesis + timing/power analysis) — only needed if you
+**9. Set up `yosys-sta`** (synthesis + timing/power analysis) — only needed if you
 plan to redo the PPA/synthesis work, not for RTL simulation itself:
 ```bash
 cd ~/Desktop
@@ -876,7 +918,7 @@ make init
 echo exit | ./bin/iEDA -v
 ```
 
-**9. Build NEMU from source.** Only the *source code* is saved in git — the compiled
+**10. Build NEMU from source.** Only the *source code* is saved in git — the compiled
 program itself isn't, so it has to be rebuilt on every new machine. `nemu/` ships
 pre-populated inside this repo (committed directly, `.git` stripped) — `bash init.sh
 nemu` will just print `"nemu is already initialized, skipping..."` and silently do
@@ -901,7 +943,7 @@ make
 ./build/riscv32-nemu-interpreter
 ```
 
-**10. Pull in the test/demo sources** (skip if step 3 already cloned `am-kernels`),
+**11. Pull in the test/demo sources** (skip if step 3 already cloned `am-kernels`),
 then see ["Testing guide — verify everything"](#testing-guide--verify-everything)
 near the top of this file for the full list of checks (cpu-tests, timer, keyboard,
 VGA, audio, malloc/hanoi demo) and what a correct result looks like for each:
@@ -909,7 +951,7 @@ VGA, audio, malloc/hanoi demo) and what a correct result looks like for each:
 bash init.sh am-kernels
 ```
 
-**11. (Optional) Add a ROM to run `fceux-am`.** `nes/rom/` is gitignored on purpose
+**12. (Optional) Add a ROM to run `fceux-am`.** `nes/rom/` is gitignored on purpose
 (ROM files shouldn't be committed), so this has to be done by hand on every machine —
 place a legally-obtained ROM at `fceux-am/nes/rom/<name>.nes`.
 
