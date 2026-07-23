@@ -23,13 +23,20 @@ void context_kload(PCB *pcb, void (*entry)(void *), void *arg) {
   pcb->cp = kcontext((Area) { pcb->stack, (uint8_t *)pcb + STACK_SIZE }, entry, arg);
 }
 
+extern uintptr_t loader(PCB *pcb, const char *filename);
+
+void context_uload(PCB *pcb, const char *filename) {
+  uintptr_t entry = loader(pcb, filename);
+  pcb->cp = ucontext(NULL, (Area) { pcb->stack, (uint8_t *)pcb + STACK_SIZE }, (void *)entry);
+}
+
 void init_proc() {
   switch_boot_pcb();
 
   Log("Initializing processes...");
 
   context_kload(&pcb[0], hello_fun, (void *)1);
-  context_kload(&pcb[1], hello_fun, (void *)2);
+  context_uload(&pcb[1], "/bin/pal");
 }
 
 Context* schedule(Context *prev) {

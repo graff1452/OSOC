@@ -1,5 +1,7 @@
 #include <fs.h>
 
+size_t ramdisk_read(void *buf, size_t offset, size_t len);
+
 typedef size_t (*ReadFn) (void *buf, size_t offset, size_t len);
 typedef size_t (*WriteFn) (const void *buf, size_t offset, size_t len);
 
@@ -30,6 +32,26 @@ static Finfo file_table[] __attribute__((used)) = {
   [FD_STDERR] = {"stderr", 0, 0, invalid_read, invalid_write},
 #include "files.h"
 };
+
+size_t fs_filesz(const char *filename) {
+  for (int i = 0; i < LENGTH(file_table); i++) {
+    if (strcmp(filename, file_table[i].name) == 0) {
+      return file_table[i].size;
+    }
+  }
+  panic("file '%s' not found", filename);
+  return 0;
+}
+
+size_t fs_read(const char *filename, void *buf, size_t offset, size_t len) {
+  for (int i = 0; i < LENGTH(file_table); i++) {
+    if (strcmp(filename, file_table[i].name) == 0) {
+      return ramdisk_read(buf, file_table[i].disk_offset + offset, len);
+    }
+  }
+  panic("file '%s' not found", filename);
+  return 0;
+}
 
 void init_fs() {
   // TODO: initialize the size of /dev/fb
