@@ -732,6 +732,86 @@ tracked here).** A fresh clone therefore does *not* carry them — see
 ["Picking up my own work on a new device"](#picking-up-my-own-work-on-a-new-device)
 below for how to reapply them on a new machine.
 
+### C5 — Exception Handling and RT-Thread (complete)
+
+Brings the same trap/CSR mechanism from PA3 into two new places: the real RTL core
+(`npc/riscv32e/`), and a full third-party embedded OS (RT-Thread) rather than just
+Nanos-lite.
+
+**RT-Thread on NEMU** (`~/Templates/rt-thread-am/bsp/abstract-machine/src/context.c`
+— a separate repo, kept outside `ysyx-workbench` on purpose; see "Related repos"
+below):
+- `rt_hw_stack_init()` — same "hand-build a fake already-trapped `Context`" trick as
+  `kcontext()`, plus a small `thread_wrapper()` to work around `kcontext()` only
+  accepting one `void*` argument while RT-Thread hands over three (`tentry`/
+  `parameter`/`texit`) — the three get stashed in a small struct at the top of the
+  new thread's own stack, and `thread_wrapper()` unpacks them the first time the
+  thread actually runs.
+- `rt_hw_context_switch_to()` / `rt_hw_context_switch()` — called from ordinary C
+  code (not from inside a trap), so they can't hand `from`/`to` to the event
+  handler directly. They stash both in two globals and call `yield()` to trigger a
+  real trap; the handler reads the globals back out once it's running.
+- **Verified:** boots fully, real shell (`msh />`), and every built-in command
+  (`help`, `date`, `version`, `free`, `ps` — showing 5 real, independently-scheduled
+  threads, `pwd`, `ls`, `memtrace`, `memcheck`, `utest_list`) runs correctly.
+
+**The same trap mechanism, ported into real RTL** (`npc/riscv32e/vsrc/minirv.v`):
+- Four new CSRs (`mstatus`, `mtvec`, `mepc`, `mcause`) — plain register instances
+  reusing the same `Reg` template `pc` already used, nothing new invented.
+- `ecall`/`mret` as fixed 32-bit instruction patterns (same style as the existing
+  `ebreak`), `csrrw`/`csrrs` decoded via the shared `SYSTEM` opcode.
+- `ecall`/`mret` extend the existing next-PC mux — no separate control-flow
+  mechanism, per the handout's own suggestion to reuse what already exists for
+  `jal`/`jalr`/branches.
+- AM's glue code (`cte.c`, `trap.S`) — previously only existing for the `nemu`
+  target — ported to a second copy for `npc`
+  (`abstract-machine/am/src/riscv/npc/`), with the same PA3/PA4.1-era fixes
+  reapplied (`EVENT_YIELD` recognition, real `kcontext()`, the "switch instead of
+  restore" `mv sp, a0` line in `trap.S`).
+
+**A genuine, previously-hidden bug, found and fixed** (affects both NEMU and NPC —
+not something newly introduced by this stage): RISC-V deliberately leaves "does the
+trap instruction re-execute or get skipped on resume" to software. Nothing in this
+project had ever actually implemented that — `mepc` was always set to the
+trapping instruction's own address, meaning resuming a thread just re-executed its
+`ecall` and re-trapped immediately, forever, with zero real progress. This had been
+invisible until now, because every earlier test either had a handler that printed
+on *every* trap regardless of real progress (PA3's single-thread `yield` test), or
+happened to route around it some other way. Caught by refusing to accept a
+`yield-os` run that only ever printed `AB` once as sufficient proof, and confirmed
+by tracing raw instruction-level execution on NEMU itself, not just NPC. Fixed with
+one line in `__am_irq_handle()` (both `nemu/cte.c` and `npc/cte.c`):
+`c->mepc += 4;` on `EVENT_YIELD`, advancing past the `ecall` before the context
+gets saved. **Verified:** genuine, sustained `ABABABAB...` alternation (not just
+two characters) on both NEMU and the real RTL, across tens of millions of cycles.
+
+**DiffTest, set up for `npc/` against NEMU-as-REF for the first time:** built NEMU
+as a shared object (`make menuconfig` → `TARGET_SHARE`, `Devices` off, matching the
+same "REF has no device model, DUT-side device touches force a resync" pattern as
+the earlier NEMU-vs-Spike DiffTest work — see step 11 below for exact commands,
+since the `.so` is a build artifact and has to be regenerated on every machine) and
+pointed `npc/riscv32e/build/Vminirv --diff <ref.so>` at it. Caught two more real
+bugs immediately:
+- `DifftestCPUState` (in `npc/riscv32e/csrc/main.cpp`) hadn't been updated when the
+  four CSRs were added to NEMU's own `CPU_state` — `difftest_regcpy()`'s raw
+  `memcpy` was writing past the end of a stack buffer sized for the old, smaller
+  struct (`stack smashing detected`). Fixed by adding the same four fields, in the
+  same order, to `DifftestCPUState`.
+- The device-touch forced-resync path only ever copied `gpr`+`pc` into REF,
+  silently zeroing REF's CSRs (`mtvec` included) on every single `putch()` call —
+  meaning REF's `mtvec` was already wiped out by the time the very first real trap
+  fired. Exposed the RTL's own CSR values as new `dbg_mstatus`/`dbg_mtvec`/
+  `dbg_mepc`/`dbg_mcause` debug ports (same pattern as the existing `dbg_a0`) so
+  the resync path could carry them across correctly.
+- **Verified:** 140+ million cycles of DiffTest against `yield-os`, zero mismatches.
+
+**RT-Thread on NPC, the actual C5 target:** same binary-build process as NEMU
+(`make ARCH=riscv32e-npc` inside `rt-thread-am/bsp/abstract-machine`), run against
+`Vminirv`. **Verified:** identical result to the NEMU run — full boot, real shell,
+every built-in command correct. (Per the handout's own footnote, the final
+`msh />` prompt sometimes doesn't print on NPC specifically — an accepted, known
+limitation, not chased down further.)
+
 ### Related repos (not included here)
 
 Not everything lives inside this repo. A few pieces grew big enough that I split them
@@ -748,6 +828,12 @@ inside this repo's own git history, no separate cloning needed):
 - **[yosys-sta](https://github.com/graff1452/yosys-sta)** — ASIC synthesis (Yosys) +
   timing/power analysis (iEDA) pipeline, used to turn `npc/` RTL into a real
   standard-cell netlist and get a first PPA (performance/power/area) estimate
+- **[rt-thread-am](https://github.com/graff1452/rt-thread-am)** — a fork of
+  [NJU-ProjectN/rt-thread-am](https://github.com/NJU-ProjectN/rt-thread-am) (RT-Thread
+  ported to run on AM), for C5's RT-Thread work. **Lives outside `ysyx-workbench`
+  entirely**, at `~/Templates/rt-thread-am` — not alongside the four repos above —
+  per the course handout's own instruction that it doesn't need to be submitted
+  with coursework. See step 11 below for the one-time clone + setup.
 
 `nanos-lite/` and `navy-apps/` are **not** on this list — unlike the four above,
 they're tracked directly inside this repo's own git history, the same way
@@ -758,8 +844,8 @@ no extra `git clone` step needed for these two. Two small pieces of `navy-apps`
 *content* still need a manual step on a new machine, though — see step 4 below.
 
 Why this matters for setup: cloning *this* repo alone is not enough to get a fully
-working checkout — the four repos above also need cloning separately. The next
-section covers exactly when and how.
+working checkout — the four repos above (plus `rt-thread-am`, kept separately still)
+also need cloning. The next section covers exactly when and how.
 
 ### Setting up a new machine
 
@@ -943,7 +1029,52 @@ make
 ./build/riscv32-nemu-interpreter
 ```
 
-**11. Pull in the test/demo sources** (skip if step 3 already cloned `am-kernels`),
+**11. Clone your `rt-thread-am` fork and do its one-time setup.** Unlike every
+other repo above, this one lives *outside* `ysyx-workbench` entirely (in
+`~/Templates`), per the course handout's own instruction that it doesn't need to
+be submitted with coursework:
+```bash
+mkdir -p ~/Templates
+cd ~/Templates
+git clone git@github.com:graff1452/rt-thread-am.git
+sudo apt-get install scons
+cd rt-thread-am/bsp/abstract-machine
+make init   # one-time only -- harmless to re-run if you're ever unsure
+```
+Then build and run it the same way as any other AM target (needs `NEMU_HOME` and
+`AM_HOME`, both set by steps 6 and 10):
+```bash
+make ARCH=riscv32-nemu run   # or riscv32e-npc, once npc/ is built (step 8)
+```
+**Expect:** it drops into NEMU's interactive `(nemu)` prompt instead of running to
+completion — a known, pre-existing quirk (`q` to exit, then run the produced
+`.bin` directly with `-b` instead, same as every other manual test in this repo).
+
+**(Optional) Rebuild NEMU as a shared object, to re-enable `npc/`'s DiffTest
+against real RTL.** This `.so` is a pure build artifact — nothing about it is
+saved in git, so it has to be regenerated from source on every new machine that
+wants to rerun `Vminirv --diff ...`:
+```bash
+cd ~/Desktop/OSOC/ysyx-workbench/nemu
+make menuconfig   # Build target -> Shared object (used as REF for differential
+                  # testing); also confirm Devices is OFF for this target
+make
+```
+This produces `nemu/build/riscv32-nemu-interpreter-so` (no `.so` file extension
+despite genuinely being one — that's just NEMU's own naming convention for this
+build target). **Immediately switch back afterward**, or every other normal NEMU
+run breaks:
+```bash
+make menuconfig   # Build target -> Executable on Linux Native
+make
+```
+Then run DiffTest against the real RTL core:
+```bash
+cd ../npc/riscv32e
+./build/Vminirv --diff ../../nemu/build/riscv32-nemu-interpreter-so <some.bin>
+```
+
+**12. Pull in the test/demo sources** (skip if step 3 already cloned `am-kernels`),
 then see ["Testing guide — verify everything"](#testing-guide--verify-everything)
 near the top of this file for the full list of checks (cpu-tests, timer, keyboard,
 VGA, audio, malloc/hanoi demo) and what a correct result looks like for each:
@@ -951,7 +1082,7 @@ VGA, audio, malloc/hanoi demo) and what a correct result looks like for each:
 bash init.sh am-kernels
 ```
 
-**12. (Optional) Add a ROM to run `fceux-am`.** `nes/rom/` is gitignored on purpose
+**13. (Optional) Add a ROM to run `fceux-am`.** `nes/rom/` is gitignored on purpose
 (ROM files shouldn't be committed), so this has to be done by hand on every machine —
 place a legally-obtained ROM at `fceux-am/nes/rom/<name>.nes`.
 
