@@ -10,7 +10,11 @@ module minirv
   output        dbg_mem_wen,
   output        dbg_mem_ren,
   output [31:0] dbg_inst,
-  output [31:0] dbg_mem_wdata
+  output [31:0] dbg_mem_wdata,
+  output [31:0] dbg_mstatus,
+  output [31:0] dbg_mtvec,
+  output [31:0] dbg_mepc,
+  output [31:0] dbg_mcause
 );
 
   import "DPI-C" function void npc_trap();
@@ -41,6 +45,19 @@ module minirv
   wire        is_sw       = is_store && (funct3 == 3'b010);
   wire        is_load_any = is_lb || is_lh || is_lw || is_lbu || is_lhu;
   wire [31:0] jalr_target = (rs1_val + imm_i) & ~32'd1;
+
+  // --- C5: trap/exception instructions and CSR access -----------------------
+  // ecall/mret are fixed 32-bit patterns (all operand fields are zero/reserved
+  // for these two), matched the exact same way is_ebreak already is above --
+  // not a new pattern, just reusing the existing style.
+  wire        is_ecall = (inst == 32'h00000073);
+  wire        is_mret  = (inst == 32'h30200073);
+  // csrrw/csrrs share the SYSTEM opcode with ecall/mret; funct3 tells them apart.
+  wire        is_csrrw = (opcode == 7'b1110011) && (funct3 == 3'b001);
+  wire        is_csrrs = (opcode == 7'b1110011) && (funct3 == 3'b010);
+  // CSR address is a raw unsigned 12-bit field at the same bit position imm_i
+  // reads from, just without imm_i's sign-extension -- read directly off inst.
+  wire [11:0] csr_addr = inst[31:20];
 
   // R-type (register-register): funct3 selects the op, funct7 additionally
   // distinguishes add/sub and srl/sra (identical funct3, opposite funct7 bit 5)
@@ -93,7 +110,8 @@ module minirv
   wire        reg_wen     = is_addi || is_lui || is_auipc || is_jalr || is_jal || is_load_any
                            || is_rtype_alu
                            || is_slli || is_slti || is_sltiu || is_xori || is_srli || is_srai || is_ori || is_andi
-                           || is_lb || is_lh || is_lhu;
+                           || is_lb || is_lh || is_lhu
+                           || is_csrrw || is_csrrs;
 
   wire [31:0] alu_a = is_lui   ? 32'b0
                      : is_auipc ? pc
@@ -117,7 +135,50 @@ module minirv
                     : (is_sltu || is_sltiu)   ? 4'd9
                     : 4'd0;   // ADD -- covers add, addi, lui, auipc, jalr target, load/store address
 
-  assign next_pc = is_jalr                      ? jalr_target
+  // --- C5: CSR storage --------------------------------------------------------
+  // Same Reg template already used for pc -- one flip-flop bank per CSR, no new
+  // primitive needed. mstatus resets to 0x1800 (matching NEMU's own boot-time
+  // init in isa/riscv32/init.c) purely so DiffTest agrees from instruction zero;
+  // nothing in this design actually reads mstatus's individual bits yet, per the
+  // handout's own simplification. mtvec/mepc/mcause reset to 0 and are only ever
+  // meaningful once software (cte_init/isa_raise_intr-equivalent traffic) sets
+  // them for real.
+  wire [31:0] mstatus_q, mtvec_q, mepc_q, mcause_q;
+  wire [31:0] csr_rdata = (csr_addr == 12'h300) ? mstatus_q
+                         : (csr_addr == 12'h305) ? mtvec_q
+                         : (csr_addr == 12'h341) ? mepc_q
+                         : (csr_addr == 12'h342) ? mcause_q
+                         : 32'b0;
+  // csrrw overwrites outright; csrrs ORs rs1_val's set bits into the existing
+  // value -- when rs1 is x0 (trap.S's `csrr` pseudo-op), this reduces to a pure
+  // read with no side effect, same as NEMU's own csrrs implementation.
+  wire [31:0] csr_wdata = is_csrrw ? rs1_val : (csr_rdata | rs1_val);
+
+  wire wen_mstatus = (is_csrrw || is_csrrs) && (csr_addr == 12'h300);
+  wire wen_mtvec   = (is_csrrw || is_csrrs) && (csr_addr == 12'h305);
+  // mepc/mcause can also be written by ecall itself (hardware trap response),
+  // not just by explicit csrrw/csrrs -- ecall and csrrw/csrrs can never both be
+  // true at once (mutually exclusive exact-match/funct3 patterns), so no
+  // priority conflict, just two independent ways to reach the same register.
+  wire wen_mepc    = is_ecall || ((is_csrrw || is_csrrs) && (csr_addr == 12'h341));
+  wire wen_mcause  = is_ecall || ((is_csrrw || is_csrrs) && (csr_addr == 12'h342));
+
+  wire [31:0] mepc_din   = is_ecall ? pc     : csr_wdata;
+  // Cause code 11 is RISC-V's spec-fixed value for "Environment call from
+  // M-mode" -- the same constant already used on the NEMU side.
+  wire [31:0] mcause_din = is_ecall ? 32'd11 : csr_wdata;
+
+  Reg #(32, 32'h00001800) u_mstatus (clk, rst, csr_wdata,  mstatus_q, wen_mstatus);
+  Reg #(32, 32'h00000000) u_mtvec   (clk, rst, csr_wdata,  mtvec_q,   wen_mtvec);
+  Reg #(32, 32'h00000000) u_mepc    (clk, rst, mepc_din,   mepc_q,    wen_mepc);
+  Reg #(32, 32'h00000000) u_mcause  (clk, rst, mcause_din, mcause_q,  wen_mcause);
+
+  // ecall/mret both cause a jump -- reusing the exact same next-address datapath
+  // every other control-flow instruction (jal/jalr/branch) already goes through,
+  // per the handout's own suggestion, rather than adding a separate mechanism.
+  assign next_pc = is_ecall                     ? mtvec_q
+                  : is_mret                      ? mepc_q
+                  : is_jalr                      ? jalr_target
                   : is_jal                       ? pc + imm_j
                   : (is_branch && branch_taken)  ? pc + imm_b
                   : pc_plus4;
@@ -125,8 +186,9 @@ module minirv
   wire        lsu_wen  = is_sw || is_sh || is_sb;
   wire        lsu_ren  = is_load_any;
 
-  wire [31:0] wdata = (is_jalr || is_jal) ? pc_plus4
-                     : is_load_any        ? lsu_rdata
+  wire [31:0] wdata = (is_jalr || is_jal)     ? pc_plus4
+                     : is_load_any            ? lsu_rdata
+                     : (is_csrrw || is_csrrs) ? csr_rdata   // old value, per csrrw/csrrs semantics
                      : alu_result;
 
   ifu u_ifu (clk, rst, next_pc, pc, inst);
@@ -150,6 +212,10 @@ module minirv
   assign dbg_mem_ren  = lsu_ren;
   assign dbg_inst      = inst;
   assign dbg_mem_wdata = rs2_val;
+  assign dbg_mstatus = mstatus_q;
+  assign dbg_mtvec   = mtvec_q;
+  assign dbg_mepc    = mepc_q;
+  assign dbg_mcause  = mcause_q;
 
   always @(posedge clk) 
   begin

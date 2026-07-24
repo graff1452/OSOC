@@ -222,7 +222,13 @@ static const char *reg_names[16] = {
 // RV32IM (32 registers), not RV32E, so this struct needs all 32 slots even though
 // our real hardware only has 16 -- the extra slots are simply never touched by
 // real RV32E programs, whose 4-bit register fields can't encode x16-x31 at all.
-struct DifftestCPUState { uint32_t gpr[32]; uint32_t pc; };
+// Must byte-for-byte match NEMU's current riscv32_CPU_state (isa-def.h) --
+// gpr[32], then pc, then the four CSRs added in PA3 -- same field order,
+// since difftest_regcpy() does a raw memcpy, not a field-by-field copy.
+// (Only gpr[0..15]/pc are actually compared per instruction below, since
+// RV32E only has 16 real registers -- but the struct's full SIZE still has
+// to match NEMU's, or every regcpy over/under-reads by 16 bytes.)
+struct DifftestCPUState { uint32_t gpr[32]; uint32_t pc; uint32_t mstatus, mtvec, mepc, mcause; };
 enum { DIFFTEST_TO_DUT = 0, DIFFTEST_TO_REF = 1 };
 
 static void (*ref_difftest_memcpy)(uint32_t addr, void *buf, size_t n, int direction) = nullptr;
@@ -671,6 +677,10 @@ static void difftest_load(const char *so_path)
     DifftestCPUState init_state;
     memset(&init_state, 0, sizeof(init_state));
     init_state.pc = PMEM_BASE;
+    init_state.mstatus = 0x1800;   // must match both DUT's Reg reset value and
+                                    // NEMU's own restart() -- otherwise this
+                                    // forced resync immediately overwrites REF's
+                                    // correctly-initialized mstatus back to 0
     ref_difftest_regcpy(&init_state, DIFFTEST_TO_REF);
 
     difftest_enabled = true;
@@ -703,6 +713,14 @@ static void difftest_check_one_instruction()
         memset(&dut_state, 0, sizeof(dut_state));
         for (int i = 0; i < 16; i++) dut_state.gpr[i] = (uint32_t)get_reg_val(i);
         dut_state.pc = g_top->pc;
+        // Must also carry the CSRs through -- a raw memcpy-based regcpy means
+        // leaving these zeroed here silently stomps REF's real mtvec/mepc/etc
+        // back to 0 on every device-touch resync (first hit: the very first
+        // putch(), which zeroed mtvec before the first real trap ever fired).
+        dut_state.mstatus = g_top->dbg_mstatus;
+        dut_state.mtvec   = g_top->dbg_mtvec;
+        dut_state.mepc    = g_top->dbg_mepc;
+        dut_state.mcause  = g_top->dbg_mcause;
         ref_difftest_regcpy(&dut_state, DIFFTEST_TO_REF);
         return;
     }
