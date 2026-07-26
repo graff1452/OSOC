@@ -8,3 +8,5 @@
 !init.sh
 /fceux-am
 /am-kernels
+ysyx-workbench/npc/*/build/
+ysyx-workbench/npc/riscv32ecustom-eval/
