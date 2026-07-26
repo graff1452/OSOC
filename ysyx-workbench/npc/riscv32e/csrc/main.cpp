@@ -765,7 +765,9 @@ static void step_n_cycles(long long n)
         itrace_record(g_top->pc, g_top->dbg_inst);
         uint32_t ftrace_site_pc = g_top->pc;      // this instruction's own address
         uint32_t ftrace_inst    = g_top->dbg_inst; // this instruction's raw bits
-        g_top->clk = 1; g_top->eval(); if (g_cycles < TRACE_CYCLES) g_tfp->dump(g_time++);
+        g_top->clk = 1; g_top->eval(); 
+        if (g_cycles < 12) printf("cycle=%lld pc=%08x inst=%08x valid=%d\n", g_cycles, g_top->pc, g_top->dbg_inst, g_top->dbg_if_valid); 
+        if (g_cycles < TRACE_CYCLES) g_tfp->dump(g_time++);
         g_cycles++;
         if (g_ftrace_enabled) {
             uint32_t opcode = ftrace_inst & 0x7f;

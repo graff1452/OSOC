@@ -18,13 +18,11 @@ module minirv
 );
 
   import "DPI-C" function void npc_trap();
-
   wire [31:0] next_pc, imm_i, imm_u, imm_s, imm_b, imm_j, rs1_val, rs2_val, alu_result, inst, lsu_rdata;
-  wire [6:0]  opcode;
+  wire [6:0]  opcode; 
   wire [2:0]  funct3;
   wire [6:0]  funct7;
   wire [3:0]  rd, rs1, rs2;
-
   wire [31:0] pc_plus4    = pc + 32'd4;
   wire        is_jalr     = (opcode == 7'b1100111);
   wire        is_jal      = (opcode == 7'b1101111);
